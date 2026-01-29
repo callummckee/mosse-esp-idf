@@ -3,6 +3,7 @@
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
 #include "esp_dsp.h"
+#include "http_parser.h"
 #include "mat.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -75,15 +76,10 @@ extern "C" void app_main(void) {
     server.server_init(32768, 80);
     server.register_handler("/", HTTP_GET, Server::page_handler_tramp);
     server.register_handler("/app.js", HTTP_GET, Server::app_js_handler_tramp); 
-    server.register_handler("/ws", HTTP_GET, Server::socket_handler_tramp, true);
+    server.register_handler("/stream_ws", HTTP_GET, Server::stream_socket_handler_tramp, true);
+    server.register_handler("/target_ws", HTTP_GET, Server::target_socket_handler_tramp, true);
 
-    size_t img_bytes = FRAME_WIDTH * FRAME_HEIGHT;
-    uint8_t* pixel_blob = (uint8_t*)heap_caps_malloc(img_bytes * 9, MALLOC_CAP_SPIRAM);
-    if (!pixel_blob) {
-        ESP_LOGE(TAG, "couldn't allocate pixel_blob aborting");
-        return;
-    }
-    Image affines[9];
+    xTaskCreatePinnedToCore(Tracker::transformationTask_tramp, "TRANSFORMATION_TASK", 4096, &server.tracker, 5, &(server.tracker.transformationTaskHandle), 1);
 
     while(1) {
         camera_fb_t* fb = esp_camera_fb_get();
@@ -92,29 +88,11 @@ extern "C" void app_main(void) {
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
-
-        for (int i = 0; i < 9; i++) {
-            affines[i].data = pixel_blob + (i * img_bytes);
-            affines[i].rows = FRAME_HEIGHT;
-            affines[i].cols = FRAME_WIDTH;
+        server.update_frame(fb);
+        if (!server.pp.reader_busy) {
+            server.send_frame();
         }
-
-        memcpy(affines[0].data, fb->buf, img_bytes);
-        affines[0].rows = fb->height;
-        affines[0].cols = fb->width;
         esp_camera_fb_return(fb);
-
-        // for (int i = 1; i < 9; i++) {
-        //     randomAffineTransformation(affines[0].data, affines[i].data, affines[0].rows, affines[0].cols);
-        // }
-        for (int i = 1; i < 9; i++) {
-            randomAffineTransformation(affines[0].data, affines[i].data, affines[0].rows, affines[0].cols);
-
-        }
-        if (server.client_fd != -1) {
-            server.update_transformations_billboard(affines);
-        }
         vTaskDelay(1);
     }
-    free(pixel_blob);
 }

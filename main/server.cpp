@@ -1,9 +1,12 @@
 #include "server.h"
 #include "config.h"
+#include "portmacro.h"
 #include "wifi_credentials.h"
 #include "mosse.h"
 
+#include "esp_timer.h"
 #include "esp_heap_caps.h"
+#include <cJSON.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
@@ -14,7 +17,11 @@
 #include "esp_wifi_default.h"
 #include "esp_wifi_types_generic.h"
 #include "mdns.h"
+#include <cstdint>
 #include <cstdio>
+#include "esp_camera.h"
+
+#define MIN(i, j) (((i) < (j)) ? (i) : (j))
 
 #define PART_BOUNDARY "123456789000000000000987654321"
 const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
@@ -29,27 +36,20 @@ extern const uint8_t app_js_start[] asm("_binary_app_js_start");
 extern const uint8_t app_js_end[] asm("_binary_app_js_end");
 
 Server::Server() {
-    frame_lock = xSemaphoreCreateMutex();
-    if (frame_lock == NULL) {
+    pp.pingpong_lock = xSemaphoreCreateMutex();
+    if (pp.pingpong_lock == NULL) {
         ESP_LOGE("server", "failed to create frame_lock semaphore");
     }
-
-    size_t img_bytes = FRAME_WIDTH * FRAME_HEIGHT;
-    m_pixel_blob = (uint8_t*)heap_caps_malloc(img_bytes * 9, MALLOC_CAP_SPIRAM);
-    if (!m_pixel_blob) {
-        ESP_LOGE("server", "couldn't allocate m_pixel_blob aborting");
-        return;
+    pp.buffers[0] = (uint8_t*)heap_caps_malloc(FRAME_WIDTH * FRAME_HEIGHT, MALLOC_CAP_INTERNAL);
+    pp.buffers[1] = (uint8_t*)heap_caps_malloc(FRAME_WIDTH * FRAME_HEIGHT, MALLOC_CAP_INTERNAL);
+    if (!pp.buffers[0] || !pp.buffers[1]) {
+        ESP_LOGE(TAG, "failed to allocate pp buffer mem");
     }
-    for (int i = 0; i < 9; i++) {
-        transformations_billboard[i].data = m_pixel_blob + (i * img_bytes);
-        transformations_billboard[i].rows = FRAME_HEIGHT;
-        transformations_billboard[i].cols = FRAME_WIDTH;
-    }
-
 }
 
 Server::~Server() {
-    free(m_pixel_blob);
+    free(pp.buffers[0]);
+    free(pp.buffers[1]);
 }
 
 
@@ -184,19 +184,30 @@ esp_err_t Server::page_handler(httpd_req_t* req) {
     return ESP_OK;
 }
 
-void Server::update_transformations_billboard(const Image* affines) {
-    if (xSemaphoreTake(frame_lock, portMAX_DELAY)) {
-        size_t img_size = FRAME_WIDTH * FRAME_HEIGHT;
-        for (int i = 0; i < 9; i ++) {
-            memcpy(transformations_billboard[i].data, affines[i].data, img_size);
-            transformations_billboard[i].rows = affines[i].rows;
-            transformations_billboard[i].cols = affines[i].cols;
 
+void Server::update_frame(camera_fb_t* fb) {
+    memcpy(pp.buffers[pp.write_index], fb->buf, fb->len);
+    if (!pp.reader_busy) {
+        if (xSemaphoreTake(pp.pingpong_lock, portMAX_DELAY)) {
+            int temp = pp.write_index;
+            pp.write_index = pp.read_index;
+            pp.read_index = temp;
+            xSemaphoreGive(pp.pingpong_lock);
         }
-        xSemaphoreGive(frame_lock);
     }
-    if (this->client_fd != -1) {
-        httpd_queue_work(this->serverhandle, this->ws_send_images, this);
+}
+
+void Server::send_target() {
+    if (this->target_fd != -1) {
+        ESP_LOGI(TAG, "in send_target");
+        httpd_queue_work(this->serverhandle, this->ws_send_target, this);
+    }
+}
+
+void Server::send_frame() {
+    if (this->stream_fd != -1) {
+        pp.reader_busy = true;
+        httpd_queue_work(this->serverhandle, this->ws_send_stream, this);
     }
 }
 
@@ -220,65 +231,134 @@ esp_err_t Server::app_js_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-esp_err_t Server::socket_handler_tramp(httpd_req_t* req) {
+esp_err_t Server::stream_socket_handler_tramp(httpd_req_t* req) {
     Server* self = static_cast<Server*>(req->user_ctx);
 
     if(!self) {
         return ESP_FAIL;
     }
-    return self->socket_handler(req);
+    return self->stream_socket_handler(req);
 }
 
-esp_err_t Server::socket_handler(httpd_req_t* req) {
+esp_err_t Server::target_socket_handler_tramp(httpd_req_t* req) {
+    Server* self = static_cast<Server*>(req->user_ctx);
+
+    if(!self) {
+        return ESP_FAIL;
+    }
+    return self->target_socket_handler(req);
+}
+
+esp_err_t Server::stream_socket_handler(httpd_req_t* req) {
     if (req->method == HTTP_GET) {
-        this->client_fd = httpd_req_to_sockfd(req);
-        ESP_LOGI(TAG, "connected on fd: %d", this->client_fd);
-        return ESP_OK;
-    } 
-    httpd_ws_frame_t ws_pkt;
-    memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
-    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
-
-    httpd_ws_recv_frame(req, &ws_pkt, 0);
-
+        this->stream_fd = httpd_req_to_sockfd(req);
+        ESP_LOGI(TAG, "connected on fd: %d", this->stream_fd);
+    }     
     return ESP_OK;
 }
 
-void Server::ws_send_images(void *arg) {
+esp_err_t Server::target_socket_handler(httpd_req_t* req) {
+    if (req->method == HTTP_GET) {
+        this->target_fd = httpd_req_to_sockfd(req);
+        ESP_LOGI(TAG, "connected on fd: %d", this->target_fd);
+        return ESP_OK;
+    }     
+    uint8_t *buf = NULL;
+    httpd_ws_frame_t ws_pkt;
+    memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
+    ws_pkt.type = HTTPD_WS_TYPE_BINARY;
+
+    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_ws_recv_frame failed to get frame len with %d", ret);
+        return ret;
+    }
+    ESP_LOGI(TAG, "frame len is %d", ws_pkt.len);
+    if (ws_pkt.len) {
+        buf = (uint8_t*)heap_caps_malloc(ws_pkt.len, MALLOC_CAP_SPIRAM);
+        if (!buf) {
+            ESP_LOGE(TAG, "Failed to allocate memory for buf");
+            return ESP_ERR_NO_MEM;
+        }
+        ws_pkt.payload = buf;
+        /* Set max_len = ws_pkt.len to get the frame payload */
+        ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "httpd_ws_recv_frame failed with %d", ret);
+            free(buf);
+            return ret;
+        }
+        tracker.target.rows = buf[0];
+        ESP_LOGI(TAG, "setting target.rows: %d", tracker.target.rows);
+        tracker.target.cols = buf[1];
+        ESP_LOGI(TAG, "setting target.cols: %d", tracker.target.cols);
+        tracker.updateTarget(&(buf[2]), ws_pkt.len - 2);
+        xTaskNotifyGive(this->tracker.transformationTaskHandle);
+        free(buf);
+    }
+    send_target();
+    return ESP_OK;
+}
+
+
+void Server::ws_send_stream(void *arg) {
+    Server* self = (Server *)arg;
+    uint8_t* data = NULL;
+    if (xSemaphoreTake(self->pp.pingpong_lock, portMAX_DELAY)) {
+        data = self->pp.buffers[self->pp.read_index];
+        xSemaphoreGive(self->pp.pingpong_lock);
+    }
+    httpd_ws_frame_t ws_pkt = {};
+    ws_pkt.payload = data;
+    ws_pkt.len = FRAME_HEIGHT * FRAME_WIDTH; 
+    ws_pkt.type = HTTPD_WS_TYPE_BINARY;
+
+    if (self->stream_fd != -1) {
+        int64_t start = esp_timer_get_time();
+        esp_err_t err = httpd_ws_send_frame_async(self->serverhandle, self->stream_fd, &ws_pkt);
+        int64_t end = esp_timer_get_time();
+        if (end - start > 10000) {
+            ESP_LOGW(TAG, "slow send took %lld us", end - start);
+        }
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "ws fatal error: %s", esp_err_to_name(err));
+            self->stream_fd = -1;
+        }
+    }
+    self->pp.reader_busy = false; 
+}
+
+
+void Server::ws_send_target(void* arg) {
     Server* self = (Server *)arg;
     Image* data;
 
-    xSemaphoreTake(self->frame_lock, portMAX_DELAY);
-    data = &(self->transformations_billboard)[0];
-    xSemaphoreGive(self->frame_lock);
-    size_t len = data[0].cols * data[0].rows;
+    xSemaphoreTake(self->tracker.target_lock, portMAX_DELAY);
+    data = &self->tracker.target;
+    xSemaphoreGive(self->tracker.target_lock);
+    size_t len = data->rows * data->cols;
+    ESP_LOGI(TAG, "sending target of len: %d", len);
     uint8_t* packet = (uint8_t*)heap_caps_malloc(len + 5, MALLOC_CAP_SPIRAM);
-
     if(!packet) {
         ESP_LOGE(TAG, "error allocating packet");
         return;
     }
 
-    for (int i = 0; i < 9; i++) {
-        packet[0] = i;
-        packet[1] = (len >> 24) & 0xFF;
-        packet[2] = (len >> 16) & 0xFF;
-        packet[3] = (len >> 8) & 0xFF;
-        packet[4] = len & 0xFF;
+    packet[0] = data->rows;
+    packet[1] = data->cols;
 
-        memcpy(&packet[5], data[i].data, len); 
-        httpd_ws_frame_t ws_pkt = {};
-        ws_pkt.payload = packet;
-        ws_pkt.len = len + 5; 
-        ws_pkt.type = HTTPD_WS_TYPE_BINARY;
+    memcpy(&packet[2], data->data, len); 
+    httpd_ws_frame_t ws_pkt = {};
+    ws_pkt.payload = packet;
+    ws_pkt.len = len + 2; 
+    ws_pkt.type = HTTPD_WS_TYPE_BINARY;
 
-        if (self->client_fd != -1) {
-            esp_err_t err = httpd_ws_send_frame_async(self->serverhandle, self->client_fd, &ws_pkt);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "ws fatal error: %s", esp_err_to_name(err));
-                self->client_fd = -1;
-            }
+    if (self->target_fd != -1) {
+        esp_err_t err = httpd_ws_send_frame_async(self->serverhandle, self->target_fd, &ws_pkt);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "ws fatal error: %s", esp_err_to_name(err));
+            self->target_fd = -1;
         }
     }
-    free(packet);
 }
+

@@ -3,19 +3,24 @@
     <head>
         <style>
 body {
-    background-color:  #003333; 
+    background-color: #003333; 
     color: white;
     font-family: sans-serif;
     margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    min-height: 100vh;
 }
+
 .main_stream {
     position: relative;
-    width: 200px;
+    width: 200px; 
     height: 200px;
-    display: flex;
-    justify-content: center;
-    align-items: center;
+    margin: 20px 0; 
 }
+
 .main_stream canvas {
     position: absolute;
     top: 0;
@@ -24,23 +29,20 @@ body {
     height: 100%;
     image-rendering: pixelated;
 }
-
-.affine_grid {
-    display: grid;
-    grid-template-columns: repeat(9, 1fr);
-    grid-template-rows: 1fr;
-    grid-column-gap: 0px;
-    grid-row-gap: 0px;
-    gap: 0;
-    padding: 0;
-    border: none;
-    background-color: #002222;
+.target_div {
+    position: relative;
+    width: 200px; 
+    height: 200px;
+    margin: 20px 0; 
 }
-.affine_grid canvas {
-    display: block;
+
+.target_div canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
     image-rendering: pixelated;
-    margin: 0;
-    padding: 0;
 }
 canvas {
     border:black 3px solid;
@@ -49,9 +51,13 @@ canvas {
     z-index: 1;
 }
 #draw_canvas {
-    z-index: 2;
+    z-index: 3;
     background-color: transparent;
     cursor: crosshair;
+}
+#confirmed_canvas {
+    z-index: 2;
+    background-color: transparent;
 }
         </style>
     </head>
@@ -59,19 +65,12 @@ canvas {
     <body>
         <div class = "main_stream">
             <canvas id="stream_canvas" width="96" height="96"></canvas>
-            <canvas id = "draw_canvas"></canvas>
+            <canvas id="draw_canvas" width="96" height="96"></canvas>
+            <canvas id="confirmed_canvas" width="96" height="96"></canvas> 
         </div>
         <br><br>
-        <div class = "affine_grid">
-            <canvas id="affine-1" width="96" height="96"></canvas>
-            <canvas id="affine-2" width="96" height="96"></canvas>
-            <canvas id="affine-3" width="96" height="96"></canvas>
-            <canvas id="affine-4" width="96" height="96"></canvas>
-            <canvas id="affine-5" width="96" height="96"></canvas>
-            <canvas id="affine-6" width="96" height="96"></canvas>
-            <canvas id="affine-7" width="96" height="96"></canvas>
-            <canvas id="affine-8" width="96" height="96"></canvas>
-            <canvas id="affine-9" width="96" height="96"></canvas>
+        <div class = "target_div">
+            <canvas id="target_canvas" width="96" height="96"></canvas>
         </div>
         <script src="app.js"></script>
     </body>

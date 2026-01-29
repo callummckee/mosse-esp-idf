@@ -1,6 +1,10 @@
 #include "mosse.h"
 #include "config.h"
 #include "dspm_mult.h"
+#include "esp_heap_caps.h"
+#include "freertos/idf_additions.h"
+#include "freertos/projdefs.h"
+#include "portmacro.h"
 #include "randomutils.h"
 #include <cstdint>
 #include <math.h>
@@ -19,8 +23,75 @@ const float y_shift_sigma = 0.15;
 
 static const char* TAG = "mosse.cpp";
 
+Tracker::Tracker() {
+    target_data = (uint8_t*)heap_caps_malloc(FRAME_WIDTH*FRAME_HEIGHT, MALLOC_CAP_INTERNAL);
+    if (!target_data) {
+        ESP_LOGE(TAG, "couldn't allocate target_data mem");
+    }
+    target.data = target_data;
+    target_lock = xSemaphoreCreateMutex();
+    if (target_lock == NULL) {
+        ESP_LOGE(TAG, "failed to create target_lock semaphore");
+    }
 
+    size_t img_bytes = FRAME_WIDTH * FRAME_HEIGHT;
+    m_pixel_blob = (uint8_t*)heap_caps_malloc(img_bytes * NUM_TRANSFORMATIONS, MALLOC_CAP_SPIRAM);
+    if (!m_pixel_blob) {
+        ESP_LOGE("server", "couldn't allocate m_pixel_blob");
+        return;
+    }
+    for (int i = 0; i < NUM_TRANSFORMATIONS; i++) {
+        transformations[i].data = m_pixel_blob + (i * img_bytes);
+        transformations[i].rows = FRAME_HEIGHT;
+        transformations[i].cols = FRAME_WIDTH;
+    }
+    transformations_lock = xSemaphoreCreateMutex();
+    if (transformations_lock == NULL) {
+        ESP_LOGE(TAG, "failed to create transformations_lock semaphore");
+    }
+}
 
+Tracker::~Tracker() {
+    free(target_data);
+    free(m_pixel_blob);
+}
+
+void Tracker::updateTarget(uint8_t* payload, size_t len) {
+    ESP_LOGI(TAG, "updating target of size: %d", len);
+    if(xSemaphoreTake(this->target_lock, portMAX_DELAY)) {
+        memcpy(target.data, payload, len);
+        xSemaphoreGive(target_lock);
+    } 
+}
+
+void Tracker::transformationTask_tramp(void* _this) {
+    Tracker* self = (Tracker*)_this;
+    self->transformationTaskLoop();
+}
+
+void Tracker::transformationTaskLoop() {
+    while(true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint8_t* temp_target_data = NULL; 
+        int rows = 0;
+        int cols = 0;
+        if (xSemaphoreTake(target_lock, portMAX_DELAY)) {
+            rows = target.rows;
+            cols = target.cols;
+            temp_target_data = (uint8_t*)heap_caps_malloc(rows*cols, MALLOC_CAP_INTERNAL);
+            memcpy(temp_target_data, target.data, rows*cols);
+            xSemaphoreGive(target_lock);
+        }
+        ESP_LOGI(TAG, "creating an affine transformation with rows: %d, cols:%d", rows, cols);
+        if (xSemaphoreTake(transformations_lock, portMAX_DELAY)) {
+            for (int i = 0; i < NUM_TRANSFORMATIONS; i++) {
+                randomAffineTransformation(temp_target_data, transformations[i].data, rows, cols);
+            }
+            xSemaphoreGive(transformations_lock);
+        }
+        free(temp_target_data);
+    }
+}
 
 void NOT_randomAffineTransformation(uint8_t* input, uint8_t* output, int rows, int cols, float theta_deg, float lambda, float x_shift, float y_shift) {
     float theta_rad = (theta_deg * M_PI)/180;
@@ -127,5 +198,4 @@ void randomAffineTransformation(uint8_t* input, uint8_t* output, int rows, int c
 
     }
 }
-
 
