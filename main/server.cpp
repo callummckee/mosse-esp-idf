@@ -1,9 +1,10 @@
 #include "server.h"
 #include "config.h"
-#include "portmacro.h"
 #include "wifi_credentials.h"
 #include "mosse.h"
 
+#include "esp_jpeg_common.h"
+#include "esp_jpeg_enc.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include <cJSON.h>
@@ -15,7 +16,6 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
-#include "esp_wifi_types_generic.h"
 #include "mdns.h"
 #include <cstdint>
 #include <cstdio>
@@ -23,17 +23,48 @@
 
 #define MIN(i, j) (((i) < (j)) ? (i) : (j))
 
-#define PART_BOUNDARY "123456789000000000000987654321"
-const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
-const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
-const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
-
 static const char* TAG = "server.cpp";
 
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[] asm("_binary_index_html_end");
 extern const uint8_t app_js_start[] asm("_binary_app_js_start");
 extern const uint8_t app_js_end[] asm("_binary_app_js_end");
+
+JPEGEnc::JPEGEnc() {
+    // will have to throw exceptions to properly handle errors here, happy to fail loudly for now
+    cfg.width = FRAME_WIDTH;
+    cfg.height = FRAME_HEIGHT;
+    cfg.src_type = JPEG_PIXEL_FORMAT_GRAY;
+    cfg.subsampling = JPEG_SUBSAMPLE_GRAY;
+    cfg.quality = 40;
+    cfg.rotate = JPEG_ROTATE_0D;
+    cfg.task_enable = false;
+    cfg.hfm_task_priority = 13;
+    cfg.hfm_task_core = 1;
+
+    jpeg_error_t err = jpeg_enc_open(&cfg, &jpeg_enc);
+    if (err != JPEG_ERR_OK) {
+        ESP_LOGE(TAG, "jpeg_enc_open failed with err: %d", err);
+    }
+
+    outbuf = (uint8_t*)calloc(1, image_size);
+    if (outbuf == NULL) {
+        ESP_LOGE(TAG, "failed to calloc outbuf"); 
+    }
+
+}
+
+JPEGEnc::~JPEGEnc() {
+    jpeg_enc_close(jpeg_enc); 
+    if (outbuf) {
+        free(outbuf);
+    }
+}
+
+jpeg_error_t JPEGEnc::encode(uint8_t* inbuf) {
+    jpeg_error_t err = jpeg_enc_process(jpeg_enc, inbuf, image_size, outbuf, image_size, &out_len);
+    return err;
+}
 
 Server::Server() {
     pp.pingpong_lock = xSemaphoreCreateMutex();
@@ -151,7 +182,7 @@ void Server::server_init(uint16_t ctrl_port, uint16_t port)
     config.server_port = port;
     config.lru_purge_enable = true;
     config.ctrl_port = ctrl_port;
-    config.max_req_hdr_len = 4096;
+    //    config.max_req_hdr_len = 4096;
 
     ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
     if (httpd_start(&server, &config) == ESP_OK) {
@@ -307,10 +338,14 @@ void Server::ws_send_stream(void *arg) {
     if (xSemaphoreTake(self->pp.pingpong_lock, portMAX_DELAY)) {
         data = self->pp.buffers[self->pp.read_index];
         xSemaphoreGive(self->pp.pingpong_lock);
-    }
+    } //check to see if data is NULL?
+    self->pp.reader_busy = false;
     httpd_ws_frame_t ws_pkt = {};
-    ws_pkt.payload = data;
-    ws_pkt.len = FRAME_HEIGHT * FRAME_WIDTH; 
+    if (self->jpegenc.encode(data) != JPEG_ERR_OK) {
+        return;
+    }
+    ws_pkt.payload = self->jpegenc.outbuf;
+    ws_pkt.len = self->jpegenc.out_len; 
     ws_pkt.type = HTTPD_WS_TYPE_BINARY;
 
     if (self->stream_fd != -1) {
@@ -325,7 +360,6 @@ void Server::ws_send_stream(void *arg) {
             self->stream_fd = -1;
         }
     }
-    self->pp.reader_busy = false; 
 }
 
 
