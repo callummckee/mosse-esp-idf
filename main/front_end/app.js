@@ -39,25 +39,14 @@ function extractTarget(roi, image) {
 
 stream_socket.onmessage = async function(event) {
     const buffer = await event.data.arrayBuffer();
-    //console.log(`Buffer received: ${buffer.bytelength} bytes`);
-    const view = new DataView(buffer);
-    //console.log(`Processing image ID: ${id}`);
+    console.log(`Buffer received: ${buffer.bytelength} bytes`);
     const pixels = new Uint8Array(buffer);
     frameHistory[frameCounter % buf_size] = new Uint8Array(pixels, pixels.length);
     frameCounter++;
-
-    const imgData = new ImageData(frameHeight, frameWidth);
-    for (let i = 0; i < pixels.length; i++) {
-        const val = pixels[i];
-        const stride = i * 4;
-        imgData.data[stride] = val;
-        imgData.data[stride + 1] = val;
-        imgData.data[stride + 2] = val;
-        imgData.data[stride + 3] = 255;
-    }
-
+    const blob = new Blob([pixels], { type: 'image/jpeg' });
+    const bitmap = await createImageBitmap(blob);
     if (streamCtx) {
-        streamCtx.putImageData(imgData, 0, 0);
+        streamCtx.drawImage(bitmap, 0, 0);
     }
 }
 

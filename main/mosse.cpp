@@ -4,12 +4,13 @@
 #include "esp_heap_caps.h"
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
-#include "portmacro.h"
 #include "randomutils.h"
 #include <cstdint>
 #include <math.h>
 #include "esp_log.h"
 #include "bootloader_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "server.h"
 #include "mat.h"

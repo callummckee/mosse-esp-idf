@@ -66,7 +66,7 @@ extern "C" void app_main(void) {
     camera_config_t config_cam = get_camera_config();
     esp_err_t err_cam = esp_camera_init(&config_cam);
     if (err_cam != ESP_OK) {
-        ESP_LOGE(TAG, "Camera Init Failed: 0x%x");
+        ESP_LOGE(TAG, "Camera Init Failed: 0x%x", err_cam);
         return;
     }
 
