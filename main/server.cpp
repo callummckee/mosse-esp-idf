@@ -327,7 +327,6 @@ esp_err_t Server::target_socket_handler(httpd_req_t* req) {
         xTaskNotifyGive(this->tracker.transformationTaskHandle);
         free(buf);
     }
-    send_target();
     return ESP_OK;
 }
 

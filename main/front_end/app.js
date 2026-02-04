@@ -21,27 +21,13 @@ let confirmedFrame = -1;
 let startX, startY;
 let canConfirm = false;
 let confirmed = false;
-let drawRoi, confirmRoi
-
-function extractTarget(roi, image) {
-    let target = new Uint8Array(roi.w * roi.h + 2);
-    target[0] = roi.h;
-    target[1] = roi.w;
-    for (let y = 0; y < roi.h; y++) {
-        for (let x = 0; x < roi.w; x++) {
-            target[2 + (y * roi.w + x)] = image[(roi.y + y) * 96 + (roi.x + x)];
-        }
-    }
-    return target;
-    
-}
-
+let drawRoi, confirmRoi;
 
 stream_socket.onmessage = async function(event) {
     const buffer = await event.data.arrayBuffer();
     console.log(`Buffer received: ${buffer.bytelength} bytes`);
     const pixels = new Uint8Array(buffer);
-    frameHistory[frameCounter % buf_size] = new Uint8Array(pixels, pixels.length);
+    frameHistory[frameCounter % buf_size] = new Uint8Array(pixels);
     frameCounter++;
     const blob = new Blob([pixels], { type: 'image/jpeg' });
     const bitmap = await createImageBitmap(blob);
@@ -51,25 +37,6 @@ stream_socket.onmessage = async function(event) {
 }
 
 target_socket.onmessage = async function(event) {
-    const buffer = await event.data.arrayBuffer();
-    const pixels = new Uint8Array(buffer, 2);
-    const view = new DataView(buffer);
-    const rows = view.getUint8(0);
-    const cols = view.getUint8(1);
-
-    const imgData = new ImageData(cols, rows);
-    for (let i = 0; i < pixels.length; i++) {
-        const val = pixels[i];
-        const stride = i * 4;
-        imgData.data[stride] = val;
-        imgData.data[stride + 1] = val;
-        imgData.data[stride + 2] = val;
-        imgData.data[stride + 3] = 255;
-    }
-    if(targetCtx) {
-        targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
-        targetCtx.putImageData(imgData, 0, 0);
-    }
 }
 
 document.addEventListener('keydown', async (e) => {
@@ -91,7 +58,20 @@ document.addEventListener('keydown', async (e) => {
             confirmRoi = {...drawRoi };
             console.log("confirmRoi: ", confirmRoi);
             console.log("confirmed frame length: ", frameHistory[confirmedFrame].length);
-            target_socket.send(extractTarget(confirmRoi, frameHistory[confirmedFrame]));
+            const blob = new Blob([frameHistory[confirmedFrame]], { type: 'image/jpeg' });
+            const bitmap = await createImageBitmap(blob);
+            targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+            targetCtx.drawImage(bitmap, confirmRoi.x, confirmRoi.y, confirmRoi.w, confirmRoi.h, 0, 0, confirmRoi.w, confirmRoi.h);
+            targetCanvas.toBlob(async (blob) => {
+                const imgBuffer = await blob.arrayBuffer(); 
+                const imgView = new Uint8Array(imgBuffer);
+                const combinedData = new Uint8Array(imgView.length + 2);
+                combinedData[0] = confirmRoi.h;
+                combinedData[1] = confirmRoi.w;
+                combinedData.set(imgView, 2);
+                target_socket.send(combinedData.buffer);
+                console.log(`sent ROI of length: ${combinedData.bytelength} bytes`);
+            }, 'image/jpeg', 0.4);
         }
     }
 });
