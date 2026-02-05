@@ -13,6 +13,7 @@ class Mat {
         }
 
         void invert2x2(Mat<2, 2>& out) const {
+            // inverts matrix and sends output to out, if det = 0, then each element in output set to 0
             static_assert(R == 2 && C == 2, "invert2x2 must be used on a 2x2 Mat!");
             float det = (this->m_data[0] * this->m_data[3] - this->m_data[1] * this->m_data[2]);
             if (det < 1e-6) {
