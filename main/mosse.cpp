@@ -1,6 +1,7 @@
 #include "mosse.h"
 #include "config.h"
 #include "dspm_mult.h"
+#include "dsps_fft2r.h"
 #include "esp_heap_caps.h"
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
@@ -11,6 +12,7 @@
 #include "bootloader_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_dsp.h"
 
 #include "server.h"
 #include "mat.h"
@@ -21,6 +23,7 @@ const int lambda_mean = 1;
 const float lambda_sigma = 0.5;
 const float x_shift_sigma = 0.15;
 const float y_shift_sigma = 0.15;
+
 
 static const char* TAG = "mosse.cpp";
 
@@ -72,9 +75,13 @@ void Tracker::generateFG() {
     int y_0 = (int)round(target.rows/2.0f) - 1;
     generate2dGaussian(gaussians[0].data, target.cols, target.rows, x_0, y_0, 2, 2, 255);
     for (int i = 0; i < NUM_TRANSFORMATIONS; i++) {
-       randomAffineTransformation(target.data, transformations[i].data, target.rows, target.cols, x_shift_temp, y_shift_temp);
+       generateRandomAffine(target.data, transformations[i].data, target.rows, target.cols, x_shift_temp, y_shift_temp);
        shiftGaussian(gaussians[0].data, gaussians[i + 1].data, target.rows, target.cols, x_shift_temp, y_shift_temp); 
     }
+}
+
+void Tracker::generateInitialFilter() {
+
 }
 
 void Tracker::updateTarget(uint8_t* payload, size_t len) {
@@ -85,36 +92,7 @@ void Tracker::updateTarget(uint8_t* payload, size_t len) {
     } 
 }
 
-void Tracker::transformationTask_tramp(void* _this) {
-    Tracker* self = (Tracker*)_this;
-    self->transformationTaskLoop();
-}
-
-void Tracker::transformationTaskLoop() {
-    while(true) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        uint8_t* temp_target_data = NULL; 
-        int rows = 0;
-        int cols = 0;
-        if (xSemaphoreTake(target_lock, portMAX_DELAY)) {
-            rows = target.rows;
-            cols = target.cols;
-            temp_target_data = (uint8_t*)heap_caps_malloc(rows*cols, MALLOC_CAP_INTERNAL);
-            memcpy(temp_target_data, target.data, rows*cols);
-            xSemaphoreGive(target_lock);
-        }
-        ESP_LOGI(TAG, "creating an affine transformation with rows: %d, cols:%d", rows, cols);
-        if (xSemaphoreTake(transformations_lock, portMAX_DELAY)) {
-            for (int i = 0; i < NUM_TRANSFORMATIONS; i++) {
-                randomAffineTransformation(temp_target_data, transformations[i].data, rows, cols);
-            }
-            xSemaphoreGive(transformations_lock);
-        }
-        free(temp_target_data);
-    }
-}
-
-void NOT_randomAffineTransformation(uint8_t* input, uint8_t* output, int rows, int cols, float theta_deg, float lambda, float x_shift, float y_shift) {
+void NOT_generateRandomAffine(uint8_t* input, uint8_t* output, int rows, int cols, float theta_deg, float lambda, float x_shift, float y_shift) {
     //test function can probably be deleted soon
     float theta_rad = (theta_deg * M_PI)/180;
     float costheta = cos(theta_rad);
@@ -161,7 +139,7 @@ void NOT_randomAffineTransformation(uint8_t* input, uint8_t* output, int rows, i
 }
 
 
-void randomAffineTransformation(uint8_t* input, uint8_t* output, int rows, int cols, int& x_shift_out, int& y_shift_out) {
+void Tracker::generateRandomAffine(uint8_t* input, uint8_t* output, int rows, int cols, int& x_shift_out, int& y_shift_out) {
     /* Applies a random transformation that simulates small changes in 
      * rotation, scaling, translation, blur, noise
      * rotation, scaling and translation achieved through affine transformation
@@ -225,7 +203,7 @@ void randomAffineTransformation(uint8_t* input, uint8_t* output, int rows, int c
     }
 }
 
-void generate2dGaussian(uint8_t* output, int width, int height, int x_0, int y_0, int xsigma, int ysigma, float amplitude) {
+void Tracker::generate2dGaussian(uint8_t* output, int width, int height, int x_0, int y_0, int xsigma, int ysigma, float amplitude) {
     // x_0, y_0 centre of gaussian (must be 0 indexed!), output pre-allocated 
     for (int i = 0; i < width * height; i++) {
         int y = i/width;
@@ -235,7 +213,7 @@ void generate2dGaussian(uint8_t* output, int width, int height, int x_0, int y_0
 }
 
 //calculating shiftGaussian like this does lead to some off by one errors in centring the gaussian on the affine transform due to the backwards mapping rounding shit but it really shouldn't matter as long as the tracking window isn't tiny tiny
-void shiftGaussian(uint8_t* input, uint8_t* output, int width, int height, int x_shift, int y_shift) {
+void Tracker::shiftGaussian(uint8_t* input, uint8_t* output, int width, int height, int x_shift, int y_shift) {
     for (int i = 0; i < width * height; i++) {
         int y = i/width;
         int x = i % width;
@@ -249,5 +227,66 @@ void shiftGaussian(uint8_t* input, uint8_t* output, int width, int height, int x
             output[i] = input[in_index];
         }
     }
+}
+
+
+
+void FFT2D(float* input, float* output, int M, int N) { 
+    esp_err_t ret;
+    ret = dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE);
+    if (ret  != ESP_OK) {
+        ESP_LOGE(TAG, "Not possible to initialize FFT. Error = %i", ret);
+        return;
+    }
+
+    //transform input to array of form Re[0], Im[0], ... Re[N-1], Im[N-1]
+    float* buf = (float*)heap_caps_aligned_alloc(16, M*N*2*sizeof(float), MALLOC_CAP_SPIRAM);
+    if (buf == NULL) {
+        ESP_LOGE(TAG, "failed to allocate buf");
+        return;
+    }
+    for (int i = 0; i < M*N; i++) {
+        buf[i * 2] = input[i];
+        buf[i * 2 + 1] = 0;
+    }
+
+    //apply fft to each row
+    for(int i = 0; i < M; i++) {
+        float* row_ptr = buf + i*N*2;
+        ret = dsps_fft2r_fc32_aes3(row_ptr, N);
+        if (ret  != ESP_OK) {
+            ESP_LOGE(TAG, "error performing fft on row %d Error = %x", i, ret);
+        }
+        dsps_bit_rev_fc32_ansi(row_ptr, N);
+    }
+
+    //transpose intermediate matrix
+    float* trans_buf = (float*)heap_caps_aligned_alloc(16, M*N*2*sizeof(float), MALLOC_CAP_SPIRAM);
+    for (int i = 0; i < M*N; i++) {
+        int x = i % M;
+        int y = i / M;
+        int index = x * N + y;
+        trans_buf[i*2] = buf[index * 2];
+        trans_buf[i*2 + 1] = buf[index * 2 + 1];
+    }
+
+    //apply fft to each col of og matrix by applying to each row of transpose
+    for(int i = 0; i < N; i++) {
+        float* col_ptr = trans_buf + i * M * 2;
+        dsps_fft2r_fc32_aes3(col_ptr, M);
+        dsps_bit_rev_fc32_ansi(col_ptr, M);
+    }
+
+    for (int i = 0; i < M*N; i++) {
+        int x = i % N;
+        int y = i / N;
+        int index = x * M + y;
+        buf[i*2] = trans_buf[index * 2];
+        buf[i*2 + 1] = trans_buf[index * 2 + 1];
+    }
+
+    memcpy(output, buf, M*N*2*sizeof(float));
+    free(buf);
+    free(trans_buf);
 }
 
