@@ -19,6 +19,7 @@
 static const char* TAG = "main.cpp";
 
 
+
 static camera_config_t get_camera_config() {
     camera_config_t config = {};
 
@@ -78,8 +79,6 @@ extern "C" void app_main(void) {
     server.register_handler("/app.js", HTTP_GET, Server::app_js_handler_tramp); 
     server.register_handler("/stream_ws", HTTP_GET, Server::stream_socket_handler_tramp, true);
     server.register_handler("/target_ws", HTTP_GET, Server::target_socket_handler_tramp, true);
-
-    xTaskCreatePinnedToCore(Tracker::transformationTask_tramp, "TRANSFORMATION_TASK", 4096, &server.tracker, 5, &(server.tracker.transformationTaskHandle), 1);
 
     while(1) {
         camera_fb_t* fb = esp_camera_fb_get();
