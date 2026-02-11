@@ -1,7 +1,11 @@
-#include "mosse.h"
+#include "tracker.h"
 #include "config.h"
+#include "server.h"
+#include "mat.h"
+
 #include "dspm_mult.h"
 #include "dsps_fft2r.h"
+#include "dsps_wind_hann.h"
 #include "esp_heap_caps.h"
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
@@ -14,8 +18,6 @@
 #include "freertos/task.h"
 #include "esp_dsp.h"
 
-#include "server.h"
-#include "mat.h"
 
 const int theta_mean = 0;
 const int theta_sigma = 30;
@@ -111,10 +113,9 @@ Tracker::Tracker() {
         ESP_LOGE(TAG, "couldn't allocate FFT_trans_buf");
     }
 
-
-    transformations_lock = xSemaphoreCreateMutex();
-    if (transformations_lock == NULL) {
-        ESP_LOGE(TAG, "failed to create transformations_lock semaphore");
+    hann_window_2D = (float*)heap_caps_malloc(img_size * sizeof(float), MALLOC_CAP_SPIRAM);
+    if(!hann_window_2D) {
+        ESP_LOGE(TAG, "couldn't allocate hann_window_2D");
     }
 }
 
@@ -137,6 +138,13 @@ Tracker::~Tracker() {
 
     free(FFT_buf);
     free(FFT_trans_buf);
+    
+    free(hann_window_2D);
+}
+
+void Tracker::initTracker() {
+    generateFG();
+    generateInitialFilter();
 }
 
 void Tracker::generateFG() {
@@ -150,10 +158,10 @@ void Tracker::generateFG() {
     int x_0 = (int)round(cols/2.0f) - 1;
     int y_0 = (int)round(rows/2.0f) - 1;
     generate2dGaussian(g_i, cols, rows, x_0, y_0, 2, 2, 255);
-
+    generate2dHannWindow(hann_window_2D, rows, cols);
     //assign target to first index of f_i
     for (int i = 0; i < target_size; i++) {
-        f_i[i] = (float)target.data[i];
+        f_i[i] = (float)target.data[i] * hann_window_2D[i];
     } 
 
     //generate affine transformation and their associated gaussians
@@ -207,7 +215,7 @@ void Tracker::updateFilter(uint8_t* frame) {
     //convert frame to float
     //if we update FFT2D to take uint8_t then buf can convert on the fly
     for (int i = 0; i < target_size; i++) {
-        frame_conv_buf[i] = (float)frame[i];
+        frame_conv_buf[i] = (float)frame[i] * hann_window_2D[i];
     }
 
     //FFT frame
@@ -243,37 +251,6 @@ Coord Tracker::maxG(float* G, int rows, int cols) {
         }
     }
     return max_coord;
-}
-
-void Tracker::test() {
-    target.rows = 8;
-    target.cols = 8;
-    for (int i = 0; i < target.rows * target.cols; i++) {
-        target.data[i] = i + 1;
-    }
-    generateFG();
-    generateInitialFilter();
-
-    float* F = (float*)heap_caps_malloc(target.rows * target.cols * 2 * sizeof(float), MALLOC_CAP_SPIRAM);
-    float* gauss = (float*)heap_caps_malloc(target.rows * target.cols * 2 * sizeof(float), MALLOC_CAP_SPIRAM);
-    FFT2D(f_i, F, target.rows, target.cols, false);
-    elmWiseComplexMult(F, filter, target.rows * target.cols, gauss, false, false);
-
-    float* output = (float*)heap_caps_malloc(target.rows * target.cols * 2 * sizeof(float), MALLOC_CAP_SPIRAM);
-
-    IFFT2D(gauss, output, target.rows, target.cols, true);
-
-    for (int i = 0; i < target.rows; i++) {
-        for (int j = 0; j < target.cols; j++) {
-            ESP_LOGI(TAG, "%f ", output[(i * target.cols + j) * 2]);
-            ESP_LOGI(TAG, "%f ", output[(i * target.cols + j) * 2 + 1]);
-        }
-        printf("\n");
-    }
-
-    free(F);
-    free(output);
-    free(gauss);
 }
 
 void Tracker::matScalarRealAdd(float* inout, float scalar, int size) {
@@ -334,13 +311,20 @@ void Tracker::elmWiseComplexMult(float* in1, float* in2, int size, float* output
 
 }
 
-void Tracker::updateTarget(uint8_t* payload, size_t len) {
-    ESP_LOGI(TAG, "updating target of size: %d", len);
+void Tracker::updateTarget(uint8_t* payload, size_t len, int rows, int cols) {
     if(xSemaphoreTake(this->target_lock, portMAX_DELAY)) {
         memcpy(target.data, payload, len);
+        target.rows = rows;
+        target.cols = cols;
         xSemaphoreGive(target_lock);
+        isTracking = true;
     } 
 }
+
+Image Tracker::getTarget() {
+    return target;
+}
+
 
 void NOT_generateRandomAffine(uint8_t* input, uint8_t* output, int rows, int cols, float theta_deg, float lambda, float x_shift, float y_shift) {
     //test function can probably be deleted soon
@@ -451,6 +435,28 @@ void Tracker::generateRandomAffine(uint8_t* input, float* output, int rows, int 
         }
 
     }
+}
+
+void Tracker::generate2dHannWindow(float* out, int rows, int cols) {
+    float* window_x = (float*)heap_caps_malloc(cols * sizeof(float), MALLOC_CAP_SPIRAM);
+    if(!window_x) {
+        ESP_LOGE(TAG, "couldn't allocate window_x");
+    }
+    float* window_y = (float*)heap_caps_malloc(rows * sizeof(float), MALLOC_CAP_SPIRAM);
+    if(!window_y) {
+        ESP_LOGE(TAG, "couldn't allocate window_y");
+    }
+    dsps_wind_hann_f32(window_x, cols);
+    dsps_wind_hann_f32(window_y, rows);
+
+    for (int i = 0; i < rows * cols; i++) {
+        int x = i % cols;
+        int y = i / cols;
+        out[i] = window_x[x] * window_y[y];
+    }
+
+    free(window_x);
+    free(window_y);
 }
 
 void Tracker::generate2dGaussian(float* output, int width, int height, int x_0, int y_0, int xsigma, int ysigma, float amplitude) {

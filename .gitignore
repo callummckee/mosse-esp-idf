@@ -1,1 +1,10 @@
 main/gaussiantest.c
+.clangd
+build/
+compile_commands.json
+dependencies.lock
+main/testfuncs.cpp
+main/todo.txt
+main/wifi_credentials.h
+managed_components/
+sdkconfig.old

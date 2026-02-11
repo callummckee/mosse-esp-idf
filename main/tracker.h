@@ -22,11 +22,15 @@ class Tracker {
         Tracker();
         ~Tracker();
 
+        bool isTracking = false; 
+
         void test();
 
         SemaphoreHandle_t target_lock;
-        SemaphoreHandle_t transformations_lock;
-        TaskHandle_t transformationTaskHandle = NULL;
+
+        void updateTarget(uint8_t* payload, size_t len, int rows, int cols);
+        Image getTarget();
+        void updateFilter(uint8_t* frame);
     private:
         //buffers to be allocated in constructor, 617kb with 96x96 image and 8 transformations with buffers target.data, filter, A, B, f_i, g_i, frame_conv_buf, frame_FFT_buf, gaussian_buf, gaussian_FFT_buf
         Image target;
@@ -50,13 +54,15 @@ class Tracker {
         float* FFT_buf = NULL;
         float* FFT_trans_buf = NULL;
 
+        float* hann_window_2D = NULL;
 
-        void updateTarget(uint8_t* payload, size_t len);
+        void initTracker();
+
         void generateFG();
         void generateInitialFilter();
-        void updateFilter(uint8_t* frame);
 
 
+        void generate2dHannWindow(float* out, int rows, int cols);
         void FFT2D(float* input, float* output, int M, int N, bool complexInput);
         void IFFT2D(float* input, float* output, int M, int N, bool complexInput);
         void generate2dGaussian(float* output, int width, int height, int x_0, int y_0, int xsigma, int ysigma, float amplitude);

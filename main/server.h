@@ -7,7 +7,7 @@
 #include "esp_dsp.h"
 #include "esp_camera.h"
 
-#include "mosse.h"
+#include "tracker.h"
 #include "config.h"
 
 void start_mdns();
@@ -36,14 +36,17 @@ class JPEGEnc {
 
 class Server {
     public:
-        Server();
+        Server(Tracker* t);
         ~Server();
-        Tracker tracker = {};
+
+        TaskHandle_t* xCameraTaskHandle = NULL;
+        
+        Tracker* tracker;
 
         void wifi_init_sta();
         void server_init(uint16_t ctrl_port, uint16_t port);
-        void update_transformations_billboard(const Image* affine_transformations);
         void update_frame(camera_fb_t* fb);
+        void update_target(const Image& t);
         void send_target();
         void send_frame();
 
@@ -65,11 +68,15 @@ class Server {
     private:
         JPEGEnc jpegenc = {};
         Image frame;
+        Image target;
+        SemaphoreHandle_t target_lock;
         httpd_handle_t serverhandle = nullptr;
 
         static const int WIFI_CONNECTED_BIT = BIT0;
         static const int WIFI_FAIL_BIT = BIT1;
         EventGroupHandle_t s_wifi_event_group;
+
+        uint8_t* ws_target_buf = NULL;
 
         void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
         esp_err_t app_js_handler(httpd_req_t *req);

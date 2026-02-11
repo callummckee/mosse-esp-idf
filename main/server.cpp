@@ -1,7 +1,7 @@
 #include "server.h"
 #include "config.h"
 #include "wifi_credentials.h"
-#include "mosse.h"
+#include "tracker.h"
 
 #include "esp_jpeg_common.h"
 #include "esp_jpeg_enc.h"
@@ -66,21 +66,34 @@ jpeg_error_t JPEGEnc::encode(uint8_t* inbuf) {
     return err;
 }
 
-Server::Server() {
+Server::Server(Tracker* t) {
+    int img_size = FRAME_WIDTH * FRAME_HEIGHT;
+    tracker = t;
     pp.pingpong_lock = xSemaphoreCreateMutex();
     if (pp.pingpong_lock == NULL) {
         ESP_LOGE("server", "failed to create frame_lock semaphore");
     }
-    pp.buffers[0] = (uint8_t*)heap_caps_malloc(FRAME_WIDTH * FRAME_HEIGHT, MALLOC_CAP_INTERNAL);
-    pp.buffers[1] = (uint8_t*)heap_caps_malloc(FRAME_WIDTH * FRAME_HEIGHT, MALLOC_CAP_INTERNAL);
+
+    target_lock = xSemaphoreCreateMutex();
+    if (target_lock == NULL) {
+        ESP_LOGE(TAG, "failed to create target_lock semaphore");
+    }
+
+
+    pp.buffers[0] = (uint8_t*)heap_caps_malloc(img_size, MALLOC_CAP_INTERNAL);
+    pp.buffers[1] = (uint8_t*)heap_caps_malloc(img_size, MALLOC_CAP_INTERNAL);
     if (!pp.buffers[0] || !pp.buffers[1]) {
         ESP_LOGE(TAG, "failed to allocate pp buffer mem");
     }
+
+
+    ws_target_buf = (uint8_t*)heap_caps_malloc(img_size * sizeof(uint8_t) + 5, MALLOC_CAP_SPIRAM);
 }
 
 Server::~Server() {
     free(pp.buffers[0]);
     free(pp.buffers[1]);
+    free(ws_target_buf);
 }
 
 
@@ -319,12 +332,8 @@ esp_err_t Server::target_socket_handler(httpd_req_t* req) {
             free(buf);
             return ret;
         }
-        tracker.target.rows = buf[0];
-        ESP_LOGI(TAG, "setting target.rows: %d", tracker.target.rows);
-        tracker.target.cols = buf[1];
-        ESP_LOGI(TAG, "setting target.cols: %d", tracker.target.cols);
-        tracker.updateTarget(&(buf[2]), ws_pkt.len - 2);
-        xTaskNotifyGive(this->tracker.transformationTaskHandle);
+
+        tracker->updateTarget(&(buf[2]), ws_pkt.len - 2, buf[0], buf[1]);
         free(buf);
     }
     return ESP_OK;
@@ -332,6 +341,7 @@ esp_err_t Server::target_socket_handler(httpd_req_t* req) {
 
 
 void Server::ws_send_stream(void *arg) {
+    ESP_LOGI(TAG, "in send stream");
     Server* self = (Server *)arg;
     uint8_t* data = NULL;
     if (xSemaphoreTake(self->pp.pingpong_lock, portMAX_DELAY)) {
@@ -361,26 +371,30 @@ void Server::ws_send_stream(void *arg) {
     }
 }
 
+void Server::update_target(const Image& t) {
+   target.data = t.data;
+   target.rows = t.rows;
+   target.cols = t.cols;
+}
+
 
 void Server::ws_send_target(void* arg) {
+    //this function is so bad
     Server* self = (Server *)arg;
-    Image* data;
-
-    xSemaphoreTake(self->tracker.target_lock, portMAX_DELAY);
-    data = &self->tracker.target;
-    xSemaphoreGive(self->tracker.target_lock);
-    size_t len = data->rows * data->cols;
+    int len;
+    uint8_t* packet = (uint8_t*)heap_caps_malloc(FRAME_WIDTH * FRAME_HEIGHT+ 5, MALLOC_CAP_SPIRAM);
+    xSemaphoreTake(self->target_lock, portMAX_DELAY);
+    packet[0] = self->target.rows;
+    packet[1] = self->target.cols;
+    len = self->target.rows * self->target.cols;
+    memcpy(&packet[2], self->target.data, len); 
+    xSemaphoreGive(self->target_lock);
     ESP_LOGI(TAG, "sending target of len: %d", len);
-    uint8_t* packet = (uint8_t*)heap_caps_malloc(len + 5, MALLOC_CAP_SPIRAM);
     if(!packet) {
         ESP_LOGE(TAG, "error allocating packet");
         return;
     }
 
-    packet[0] = data->rows;
-    packet[1] = data->cols;
-
-    memcpy(&packet[2], data->data, len); 
     httpd_ws_frame_t ws_pkt = {};
     ws_pkt.payload = packet;
     ws_pkt.len = len + 2; 
@@ -393,5 +407,6 @@ void Server::ws_send_target(void* arg) {
             self->target_fd = -1;
         }
     }
+    free(packet);
 }
 

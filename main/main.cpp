@@ -11,14 +11,18 @@
 #include "nvs_flash.h"
 
 #include "randomutils.h"
-#include "mosse.h"
+#include "tracker.h"
 #include "config.h"
 #include "server.h"
 #include "pins.h"
 
+struct SystemContext {
+    Server* server;
+    Tracker* tracker;
+};
+
+
 static const char* TAG = "main.cpp";
-
-
 
 static camera_config_t get_camera_config() {
     camera_config_t config = {};
@@ -56,44 +60,67 @@ static camera_config_t get_camera_config() {
     return config;
 }
 
+void camera_task(void* pvParameters){
+    SystemContext* sysctx = (SystemContext*)pvParameters;
+    Tracker* tracker = sysctx->tracker;
+    Server* server = sysctx->server;
+
+    while(1) {
+        camera_fb_t* fb = esp_camera_fb_get();
+        if (!fb) {
+            ESP_LOGE(TAG, "frame buffer could not be acquired");
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+        if (tracker->isTracking) {
+            uint8_t* cropped_frame;
+            updateFilter(cropped_frame);
+            server->update_frame(fb);
+            if (!server->pp.reader_busy) {
+                server->send_frame();
+            }
+        }
+        else {
+            server->update_frame(fb);
+            if (!server->pp.reader_busy) {
+                server->send_frame();
+            }
+        }
+        esp_camera_fb_return(fb);
+        vTaskDelay(1);
+    }
+}
+
 extern "C" void app_main(void) {
-    // esp_err_t err = nvs_flash_init();
-    // if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-    //     ESP_ERROR_CHECK(nvs_flash_erase());
-    //     err = nvs_flash_init();
-    // }
-    // ESP_ERROR_CHECK(err);
-    //
-    // camera_config_t config_cam = get_camera_config();
-    // esp_err_t err_cam = esp_camera_init(&config_cam);
-    // if (err_cam != ESP_OK) {
-    //     ESP_LOGE(TAG, "Camera Init Failed: 0x%x", err_cam);
-    //     return;
-    // }
-    //
-    Server server;
-    server.tracker.test();
-    // server.wifi_init_sta();
-    // start_mdns();
-    // server.server_init(32768, 80);
-    // server.register_handler("/", HTTP_GET, Server::page_handler_tramp);
-    // server.register_handler("/app.js", HTTP_GET, Server::app_js_handler_tramp); 
-    // server.register_handler("/stream_ws", HTTP_GET, Server::stream_socket_handler_tramp, true);
-    // server.register_handler("/target_ws", HTTP_GET, Server::target_socket_handler_tramp, true);
-    //
-    // while(1) {
-    //     camera_fb_t* fb = esp_camera_fb_get();
-    //     if (!fb) {
-    //         ESP_LOGE(TAG, "frame buffer could not be acquired");
-    //         vTaskDelay(pdMS_TO_TICKS(500));
-    //         continue;
-    //     }
-    //     server.update_frame(fb);
-    //     if (!server.pp.reader_busy) {
-    //         server.send_frame();
-    //         break;
-    //     }
-    //     esp_camera_fb_return(fb);
-    //     vTaskDelay(1);
-    // }
+    //initialize nvs for wifi creds
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+
+    camera_config_t config_cam = get_camera_config();
+    esp_err_t err_cam = esp_camera_init(&config_cam);
+    if (err_cam != ESP_OK) {
+        ESP_LOGE(TAG, "Camera Init Failed: 0x%x", err_cam);
+        return;
+    }
+
+    Tracker* tracker = new Tracker();
+    Server* server = new Server(tracker);
+    SystemContext* sysctx = new SystemContext;
+    sysctx->server = server;
+    sysctx->tracker = tracker;
+
+    server->wifi_init_sta();
+    start_mdns();
+    server->server_init(32768, 80);
+    server->register_handler("/", HTTP_GET, Server::page_handler_tramp);
+    server->register_handler("/app.js", HTTP_GET, Server::app_js_handler_tramp); 
+    server->register_handler("/stream_ws", HTTP_GET, Server::stream_socket_handler_tramp, true);
+    server->register_handler("/target_ws", HTTP_GET, Server::target_socket_handler_tramp, true);
+
+    xTaskCreatePinnedToCore(camera_task, "Camera Task", 1024 * 16, sysctx, 5, server->xCameraTaskHandle, 1);
+    vTaskDelete(NULL); //frees mem assigned to main
 }
