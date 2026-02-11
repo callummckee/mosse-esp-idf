@@ -12,15 +12,9 @@ struct Image{
     int cols;
 };
 
-struct floatImage{
-    float* data;
-    int rows;
-    int cols;
-};
-
-struct Filter{
-    float* data;
-    int size;
+struct Coord {
+    int x;
+    int y;
 };
 
 class Tracker {
@@ -33,23 +27,35 @@ class Tracker {
         SemaphoreHandle_t target_lock;
         SemaphoreHandle_t transformations_lock;
         TaskHandle_t transformationTaskHandle = NULL;
-
+    private:
+        //buffers to be allocated in constructor, 617kb with 96x96 image and 8 transformations with buffers target.data, filter, A, B, f_i, g_i, frame_conv_buf, frame_FFT_buf, gaussian_buf, gaussian_FFT_buf
         Image target;
-        floatImage f_i[NUM_TRANSFORMATIONS + 1] = {}; //these can just be blobs! refactor later
-        floatImage g_i[NUM_TRANSFORMATIONS + 1] = {};
-        Filter filter;
+
+        float* filter = NULL;
+        float* A = NULL; 
+        float* B = NULL;
+
+        float* f_i = NULL;
+        float* g_i = NULL;
+
+        //scratchpad buffers
+        float* frame_conv_buf = NULL;
+        float* frame_FT_buf = NULL;
+        float* gaussian_buf = NULL;
+        float* gaussian_FT_buf = NULL;
+        float* A_inst = NULL;
+        float* B_inst = NULL;
+
+        //for FFT2D
+        float* FFT_buf = NULL;
+        float* FFT_trans_buf = NULL;
+
 
         void updateTarget(uint8_t* payload, size_t len);
-        void update_transformations(const Image* affines); 
         void generateFG();
         void generateInitialFilter();
-        void updateFilter();
-    private:
-        Filter A; //I know these should be different types
-        Filter B;
+        void updateFilter(uint8_t* frame);
 
-        float* f_i_blob = NULL;
-        float* g_i_blob = NULL;
 
         void FFT2D(float* input, float* output, int M, int N, bool complexInput);
         void IFFT2D(float* input, float* output, int M, int N, bool complexInput);
@@ -61,7 +67,9 @@ class Tracker {
         void elmWiseComplexDiv(float* in1, float* in2, int size, float* output);
         void elmWiseComplexMult(float* in1, float* in2, int size, float* output, bool conjin1, bool conjin2);
         void complexMatAdd(float* in1, float* in2, float* out, int size);
-        void matScalarAdd(float* in, float scalar, int size);
+        void matScalarRealAdd(float* inout, float scalar, int size);
+        void matScalarMult(float* inout, float scalar, int size);
+        Coord maxG(float* G, int rows, int cols);
 };
 
 void NOT_randomAffineTransformation(uint8_t* input, uint8_t* output, int rows, int cols, float theta, float lambda, float x_shift, float y_shift);
