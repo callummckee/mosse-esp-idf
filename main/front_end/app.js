@@ -22,17 +22,28 @@ let startX, startY;
 let canConfirm = false;
 let confirmed = false;
 let drawRoi, confirmRoi;
+let pos_x, pos_y
 
 stream_socket.onmessage = async function(event) {
     const buffer = await event.data.arrayBuffer();
-    console.log(`Buffer received: ${buffer.bytelength} bytes`);
     const pixels = new Uint8Array(buffer);
-    frameHistory[frameCounter % buf_size] = new Uint8Array(pixels);
+    if (confirmed) {
+        pos_x = pixels[0];
+        pos_y = pixels[1];
+    }
+    const imageData = pixels.subarray(2);
+    frameHistory[frameCounter % buf_size] = new Uint8Array(imageData);
     frameCounter++;
-    const blob = new Blob([pixels], { type: 'image/jpeg' });
+    const blob = new Blob([imageData], { type: 'image/jpeg' });
     const bitmap = await createImageBitmap(blob);
     if (streamCtx) {
         streamCtx.drawImage(bitmap, 0, 0);
+    }
+    if (confirmed) {
+        confirmCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+        confirmCtx.strokeStyle = '#008000';
+        confirmCtx.lineWidth = 1;
+        confirmCtx.strokeRect(pos_x, pos_y, confirmRoi.w, confirmRoi.h);
     }
 }
 
@@ -62,16 +73,18 @@ document.addEventListener('keydown', async (e) => {
             const bitmap = await createImageBitmap(blob);
             targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
             targetCtx.drawImage(bitmap, confirmRoi.x, confirmRoi.y, confirmRoi.w, confirmRoi.h, 0, 0, confirmRoi.w, confirmRoi.h);
-            targetCanvas.toBlob(async (blob) => {
-                const imgBuffer = await blob.arrayBuffer(); 
-                const imgView = new Uint8Array(imgBuffer);
-                const combinedData = new Uint8Array(imgView.length + 2);
-                combinedData[0] = confirmRoi.h;
-                combinedData[1] = confirmRoi.w;
-                combinedData.set(imgView, 2);
-                target_socket.send(combinedData.buffer);
-                console.log(`sent ROI of length: ${combinedData.bytelength} bytes`);
-            }, 'image/jpeg', 0.4);
+            const imageData = targetCtx.getImageData(0, 0, confirmRoi.w, confirmRoi.h);
+            const rawPixels = new Uint8Array(imageData.width * imageData.height);
+            for (let i = 0; i < rawPixels.length; i++) {
+                rawPixels[i] = imageData.data[i * 4];
+            }
+            const combinedData = new Uint8Array(rawPixels.length + 4);
+            combinedData[0] = confirmRoi.h;
+            combinedData[1] = confirmRoi.w;
+            combinedData[2] = confirmRoi.x;
+            combinedData[3] = confirmRoi.y;
+            combinedData.set(rawPixels, 4);
+            target_socket.send(combinedData.buffer);
         }
     }
 });

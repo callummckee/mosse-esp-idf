@@ -25,8 +25,8 @@ const int lambda_mean = 1;
 const float lambda_sigma = 0.5;
 const float x_shift_sigma = 0.15;
 const float y_shift_sigma = 0.15;
-const float reg = 0.1;
-const float learning_rate = 0.125;
+const float reg = 0.01;
+const float learning_rate = 0.05;
 
 
 static const char* TAG = "mosse.cpp";
@@ -117,6 +117,18 @@ Tracker::Tracker() {
     if(!hann_window_2D) {
         ESP_LOGE(TAG, "couldn't allocate hann_window_2D");
     }
+    
+    cropped_frame = (uint8_t*)heap_caps_malloc(img_size * sizeof(uint8_t), MALLOC_CAP_INTERNAL);
+    if(!cropped_frame) {
+        ESP_LOGE(TAG, "couldn't allocate cropped_frame");
+    }
+
+    size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    size_t max_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+
+    ESP_LOGI(TAG, "Heap Stats - Internal: %d, PSRAM: %d, Max Contiguous: %d\n", internal_free, psram_free, max_block);
+
 }
 
 Tracker::~Tracker() {
@@ -212,10 +224,11 @@ void Tracker::updateFilter(uint8_t* frame) {
     int cols = target.cols;
     int target_size = rows * cols;
 
-    //convert frame to float
-    //if we update FFT2D to take uint8_t then buf can convert on the fly
+    cropFrameToTarget(frame, cropped_frame);
+
+    //convert frame to float and apply hann_window
     for (int i = 0; i < target_size; i++) {
-        frame_conv_buf[i] = (float)frame[i] * hann_window_2D[i];
+        frame_conv_buf[i] = (float)cropped_frame[i] * hann_window_2D[i];
     }
 
     //FFT frame
@@ -224,9 +237,30 @@ void Tracker::updateFilter(uint8_t* frame) {
     //generate tracking gaussian
     elmWiseComplexMult(frame_FT_buf, filter, target_size, gaussian_FT_buf, false, false);
     IFFT2D(gaussian_FT_buf, gaussian_buf, rows, cols, false);
-    Coord offset = maxG(gaussian_buf, rows, cols);
-    generate2dGaussian(gaussian_FT_buf, cols, rows, offset.x, offset.y, 2, 2, 255);
-
+    Coord peak = maxG(gaussian_buf, rows, cols);
+    Coord offset = {peak.x - cols/2, peak.y - rows/2};
+    target.x_pos += offset.x;
+    target.y_pos += offset.y;
+    if (target.x_pos < 0) {
+        target.x_pos = 0;
+    }
+    if (target.y_pos < 0) {
+        target.y_pos = 0;
+    }
+    if (target.x_pos > (FRAME_WIDTH)) {
+        target.x_pos = FRAME_WIDTH;
+    }
+    if (target.y_pos > (FRAME_HEIGHT)) {
+        target.y_pos = FRAME_HEIGHT;
+    }
+    ESP_LOGI(TAG, "offset.x: %d, offset.y: %d, x_pos: %d, y_pos: %d", offset.x, offset.y, target.x_pos, target.y_pos);
+    cropFrameToTarget(frame, cropped_frame);
+    for (int i = 0; i < target_size; i++) {
+        frame_conv_buf[i] = (float)cropped_frame[i] * hann_window_2D[i];
+    }
+    FFT2D(frame_conv_buf, frame_FT_buf, rows, cols, false);
+    generate2dGaussian(gaussian_buf, cols, rows, cols/2, rows/2, 2, 2, 255);
+    FFT2D(gaussian_buf, gaussian_FT_buf, rows, cols, false);
     elmWiseComplexMult(gaussian_FT_buf, frame_FT_buf, target_size, A_inst, false, true);
     elmWiseComplexMult(frame_FT_buf, frame_FT_buf, target_size, B_inst, false, true);
     matScalarMult(A_inst, learning_rate, target_size);
@@ -237,6 +271,23 @@ void Tracker::updateFilter(uint8_t* frame) {
     complexMatAdd(B_inst, B, B, target_size);
     matScalarRealAdd(B, reg, target_size);
     elmWiseComplexDiv(A, B, target_size, filter);
+}
+        
+void Tracker::cropFrameToTarget(uint8_t* frame, uint8_t* crop) {
+    int source_width = FRAME_WIDTH;
+    int width = target.cols;
+    int height = target.rows;
+    int x_init = target.x_pos;
+    int y_init = target.y_pos;
+
+    for (int i = 0; i < width * height; i++) {
+        int x_dest = i % width;
+        int y_dest = i / width;
+        int x_source = x_dest + x_init;
+        int y_source = y_dest + y_init;
+        int source_index = y_source * source_width + x_source;
+        crop[i] = frame[source_index]; 
+    }
 }
 
 Coord Tracker::maxG(float* G, int rows, int cols) {
@@ -311,18 +362,18 @@ void Tracker::elmWiseComplexMult(float* in1, float* in2, int size, float* output
 
 }
 
-void Tracker::updateTarget(uint8_t* payload, size_t len, int rows, int cols) {
+void Tracker::updateTarget(uint8_t* payload, size_t len, int rows, int cols, int x_pos, int y_pos) {
     if(xSemaphoreTake(this->target_lock, portMAX_DELAY)) {
         memcpy(target.data, payload, len);
         target.rows = rows;
         target.cols = cols;
+        target.x_pos = x_pos;
+        target.y_pos = y_pos;
         xSemaphoreGive(target_lock);
+        initTracker();
+        ESP_LOGI(TAG, "starting tracking..");
         isTracking = true;
     } 
-}
-
-Image Tracker::getTarget() {
-    return target;
 }
 
 
@@ -557,7 +608,10 @@ void Tracker::FFT2D(float* input, float* output, int M, int N, bool complexInput
     }
 
     memcpy(output, FFT_buf, M*N*2*sizeof(float));
-    free(FFT_buf);
-    free(FFT_trans_buf);
+}
+
+Coord Tracker::getTargetPOS() {
+    Coord out = {target.x_pos, target.y_pos};
+    return out;
 }
 
