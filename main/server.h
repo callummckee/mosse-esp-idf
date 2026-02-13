@@ -29,8 +29,7 @@ class JPEGEnc {
     public:
         JPEGEnc();
         ~JPEGEnc();
-        jpeg_error_t encode(uint8_t* inbuf);
-        uint8_t* outbuf;
+        jpeg_error_t encode(uint8_t* inbuf, uint8_t* outbuf);
         int out_len;
 };
 
@@ -46,7 +45,6 @@ class Server {
         void wifi_init_sta();
         void server_init(uint16_t ctrl_port, uint16_t port);
         void update_frame(camera_fb_t* fb);
-        void update_target(const Image& t);
         void send_target();
         void send_frame();
 
@@ -63,12 +61,12 @@ class Server {
 
         PingPong pp = {};
 
+        void updateTargetPOS(Coord tp);
+
         int stream_fd = -1;
         int target_fd = -1;
     private:
         JPEGEnc jpegenc = {};
-        Image frame;
-        Image target;
         SemaphoreHandle_t target_lock;
         httpd_handle_t serverhandle = nullptr;
 
@@ -76,7 +74,11 @@ class Server {
         static const int WIFI_FAIL_BIT = BIT1;
         EventGroupHandle_t s_wifi_event_group;
 
+        uint8_t* ws_stream_buf = NULL;
+
         uint8_t* ws_target_buf = NULL;
+        Coord target_pos = {0, 0};
+        SemaphoreHandle_t target_pos_lock;
 
         void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
         esp_err_t app_js_handler(httpd_req_t *req);

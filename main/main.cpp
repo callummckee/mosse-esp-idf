@@ -65,6 +65,8 @@ void camera_task(void* pvParameters){
     Tracker* tracker = sysctx->tracker;
     Server* server = sysctx->server;
 
+    ESP_LOGI(TAG, "starting loop");
+
     while(1) {
         camera_fb_t* fb = esp_camera_fb_get();
         if (!fb) {
@@ -73,9 +75,9 @@ void camera_task(void* pvParameters){
             continue;
         }
         if (tracker->isTracking) {
-            uint8_t* cropped_frame;
-            updateFilter(cropped_frame);
+            tracker->updateFilter(fb->buf);
             server->update_frame(fb);
+            server->updateTargetPOS(tracker->getTargetPOS());
             if (!server->pp.reader_busy) {
                 server->send_frame();
             }
@@ -114,7 +116,7 @@ extern "C" void app_main(void) {
     sysctx->tracker = tracker;
 
     server->wifi_init_sta();
-    start_mdns();
+    start_mdns(); //move this inside a class? 
     server->server_init(32768, 80);
     server->register_handler("/", HTTP_GET, Server::page_handler_tramp);
     server->register_handler("/app.js", HTTP_GET, Server::app_js_handler_tramp); 

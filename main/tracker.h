@@ -6,10 +6,12 @@
 
 #define NUM_TRANSFORMATIONS 8
 
-struct Image{
+struct Target{
     uint8_t* data;
     int rows;
     int cols;
+    int x_pos; 
+    int y_pos;
 };
 
 struct Coord {
@@ -28,12 +30,14 @@ class Tracker {
 
         SemaphoreHandle_t target_lock;
 
-        void updateTarget(uint8_t* payload, size_t len, int rows, int cols);
-        Image getTarget();
+        void updateTarget(uint8_t* payload, size_t len, int rows, int cols, int x_pos, int y_pos);
         void updateFilter(uint8_t* frame);
+
+        Coord getTargetPOS();
+
+        void cropFrameToTarget(uint8_t* frame, uint8_t* crop);
     private:
-        //buffers to be allocated in constructor, 617kb with 96x96 image and 8 transformations with buffers target.data, filter, A, B, f_i, g_i, frame_conv_buf, frame_FFT_buf, gaussian_buf, gaussian_FFT_buf
-        Image target;
+        Target target;
 
         float* filter = NULL;
         float* A = NULL; 
@@ -56,6 +60,8 @@ class Tracker {
 
         float* hann_window_2D = NULL;
 
+        uint8_t* cropped_frame = NULL;
+        
         void initTracker();
 
         void generateFG();
