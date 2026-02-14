@@ -76,8 +76,8 @@ Server::Server(Tracker* t) {
         ESP_LOGE(TAG, "failed to create target_pos_lock semaphore");
     }
 
-    pp.buffers[0] = (uint8_t*)heap_caps_malloc(img_size, MALLOC_CAP_INTERNAL);
-    pp.buffers[1] = (uint8_t*)heap_caps_malloc(img_size, MALLOC_CAP_INTERNAL);
+    pp.buffers[0] = (uint8_t*)heap_caps_malloc(img_size, MALLOC_CAP_SPIRAM);
+    pp.buffers[1] = (uint8_t*)heap_caps_malloc(img_size, MALLOC_CAP_SPIRAM);
     if (!pp.buffers[0] || !pp.buffers[1]) {
         ESP_LOGE(TAG, "failed to allocate pp buffer mem");
     }
@@ -88,7 +88,7 @@ Server::Server(Tracker* t) {
         ESP_LOGE(TAG, "failed to allocate ws_target_buf");
     }
     
-    ws_stream_buf = (uint8_t*)heap_caps_malloc((img_size + 2) * sizeof(uint8_t), MALLOC_CAP_INTERNAL);
+    ws_stream_buf = (uint8_t*)heap_caps_malloc((img_size + 2) * sizeof(uint8_t), MALLOC_CAP_SPIRAM);
     if (!ws_stream_buf) {
         ESP_LOGE(TAG, "failed to allocate ws_stream_buf");
     }
@@ -197,10 +197,10 @@ void Server::server_init(uint16_t ctrl_port, uint16_t port)
 {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.stack_size = 8192;
     config.server_port = port;
     config.lru_purge_enable = true;
     config.ctrl_port = ctrl_port;
-    //    config.max_req_hdr_len = 4096;
 
     ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
     if (httpd_start(&server, &config) == ESP_OK) {
@@ -339,7 +339,7 @@ esp_err_t Server::target_socket_handler(httpd_req_t* req) {
         }
 
         tracker->updateTarget(&(buf[4]), ws_pkt.len - 4, buf[0], buf[1], buf[2], buf[3]);
-        free(buf);
+        heap_caps_free(buf);
     }
     return ESP_OK;
 }

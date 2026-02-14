@@ -11,6 +11,7 @@
 #include "nvs_flash.h"
 
 #include "randomutils.h"
+#include "sensor.h"
 #include "tracker.h"
 #include "config.h"
 #include "server.h"
@@ -52,10 +53,10 @@ static camera_config_t get_camera_config() {
 
     config.pixel_format = PIXFORMAT_GRAYSCALE;
     config.fb_count = 3;
-    config.frame_size = FRAMESIZE_96X96;
+    config.frame_size = FRAMESIZE_QQVGA;
 
     config.grab_mode = CAMERA_GRAB_LATEST;
-    config.fb_location = CAMERA_FB_IN_DRAM;
+    config.fb_location = CAMERA_FB_IN_PSRAM;
 
     return config;
 }
@@ -123,6 +124,7 @@ extern "C" void app_main(void) {
     server->register_handler("/stream_ws", HTTP_GET, Server::stream_socket_handler_tramp, true);
     server->register_handler("/target_ws", HTTP_GET, Server::target_socket_handler_tramp, true);
 
-    xTaskCreatePinnedToCore(camera_task, "Camera Task", 1024 * 16, sysctx, 5, server->xCameraTaskHandle, 1);
+    ESP_LOGI(TAG, "creating camera task");
+    xTaskCreatePinnedToCore(camera_task, "Camera Task", 1024 * 8, sysctx, 5, server->xCameraTaskHandle, 1);
     vTaskDelete(NULL); //frees mem assigned to main
 }

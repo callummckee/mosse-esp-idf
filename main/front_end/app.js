@@ -1,5 +1,5 @@
-const frameWidth = 96;
-const frameHeight = 96;
+const frameWidth = 160;
+const frameHeight = 120;
 const buf_size = 300;
 
 const frameHistory = new Array(buf_size);
@@ -124,7 +124,6 @@ drawCanvas.addEventListener('mouseup', (e) => {
     const endX = e.offsetX * (drawCanvas.width / drawCanvas.clientWidth);
     const endY = e.offsetY * (drawCanvas.height / drawCanvas.clientHeight);
 
-    // Final ROI in 96x96 sensor coordinates
     drawRoi = {
         x: Math.round(Math.min(startX, endX)),
         y: Math.round(Math.min(startY, endY)),
