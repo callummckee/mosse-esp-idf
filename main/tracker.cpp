@@ -11,6 +11,8 @@
 #include "freertos/projdefs.h"
 #include "randomutils.h"
 #include <cstdint>
+#include <cstdlib>
+#include <float.h>
 #include <math.h>
 #include "esp_log.h"
 #include "bootloader_random.h"
@@ -26,101 +28,84 @@ const float lambda_sigma = 0.5;
 const float x_shift_sigma = 0.15;
 const float y_shift_sigma = 0.15;
 const float reg = 0.01;
-const float learning_rate = 0.05;
+const float learning_rate = 0.125;
 
 
 static const char* TAG = "mosse.cpp";
 
 Tracker::Tracker() {
-    size_t img_size = FRAME_WIDTH * FRAME_HEIGHT;
-
-    target.data = (uint8_t*)heap_caps_malloc(img_size, MALLOC_CAP_SPIRAM);
-    if (!target.data) {
-        ESP_LOGE(TAG, "couldn't allocate target_data mem");
-    }
     target_lock = xSemaphoreCreateMutex();
     if (target_lock == NULL) {
         ESP_LOGE(TAG, "failed to create target_lock semaphore");
     }
 
-
-    filter= (float*)heap_caps_malloc(img_size * 2* sizeof(float), MALLOC_CAP_SPIRAM);
-    if(!filter) {
-        ESP_LOGE(TAG, "couldn't allocate filter");
-    }
-
-    A = (float*)heap_caps_malloc(img_size * 2* sizeof(float), MALLOC_CAP_SPIRAM);
-    if(!A) {
-        ESP_LOGE(TAG, "couldn't allocate A");
-    }
-
-    B = (float*)heap_caps_malloc(img_size * 2* sizeof(float), MALLOC_CAP_SPIRAM);
-    if(!B) {
-        ESP_LOGE(TAG, "couldn't allocate B");
-    }
-
-    A_inst = (float*)heap_caps_malloc(img_size * 2 * sizeof(float), MALLOC_CAP_SPIRAM);
-    if(!A_inst) {
-        ESP_LOGE(TAG, "couldn't allocate A_inst");
-    }
-
-    B_inst = (float*)heap_caps_malloc(img_size * 2 * sizeof(float), MALLOC_CAP_SPIRAM);
-    if(!B_inst) {
-        ESP_LOGE(TAG, "couldn't allocate B_inst");
-    }
-
-
-    f_i = (float*)heap_caps_malloc(img_size * (NUM_TRANSFORMATIONS + 1) * sizeof(float), MALLOC_CAP_SPIRAM);
-    if (!f_i) {
-        ESP_LOGE("server", "couldn't allocate f_i_blob");
-        return;
-    }
-
-    g_i = (float*)heap_caps_malloc(img_size * (NUM_TRANSFORMATIONS + 1), MALLOC_CAP_SPIRAM);
-    if (!g_i) {
-        ESP_LOGE("server", "couldn't allocate g_i_blob");
+    esp_err_t ret = dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE);
+    if (ret  != ESP_OK) {
+        ESP_LOGE(TAG, "Not possible to initialize FFT. Error = %i", ret);
         return;
     }
 
 
-    frame_conv_buf = (float*)heap_caps_malloc(img_size * sizeof(float), MALLOC_CAP_SPIRAM);    
-    if(!frame_conv_buf) {
-        ESP_LOGE(TAG, "couldn't allocate frame_conv_buf");
+    size_t img_f = FRAME_WIDTH * FRAME_HEIGHT;
+    size_t img_c = img_f * 2;
+
+    size_t aligned_size = img_c * 2 * sizeof(float);
+    aligned_blob = heap_caps_aligned_alloc(16, aligned_size, MALLOC_CAP_SPIRAM);
+    if (aligned_blob) {
+        FFT_buf = (float*)aligned_blob;
+        FFT_trans_buf = FFT_buf + img_c;
+    }
+    else {
+        ESP_LOGE(TAG, "ERROR allocating aligned_blob");
+        return;
     }
 
-    frame_FT_buf = (float*)heap_caps_malloc(img_size * 2 * sizeof(float), MALLOC_CAP_SPIRAM);
-    if(!frame_FT_buf) {
-        ESP_LOGE(TAG, "couldn't allocate frame_FT_buf");
+    ESP_LOGI(TAG, "largest free internal block: %d", heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
+    preprocessbuf = (uint8_t*)heap_caps_malloc(img_f * sizeof(uint8_t), MALLOC_CAP_INTERNAL);
+    if (!preprocessbuf){
+        ESP_LOGE(TAG, "ERROR allocating preprocessbuf");
+        heap_caps_free(aligned_blob);
+        return;
     }
 
-    gaussian_buf = (float*)heap_caps_malloc(img_size * sizeof(float), MALLOC_CAP_SPIRAM);
-    if(!gaussian_buf) {
-        ESP_LOGE(TAG, "couldn't allocate gaussian_buf");
-    }
-    
-    gaussian_FT_buf = (float*)heap_caps_malloc(img_size * 2 * sizeof(float), MALLOC_CAP_SPIRAM);
-    if(!gaussian_FT_buf) {
-        ESP_LOGE(TAG, "couldn't allocate gaussian_FT_buf");
+    target.data = (float*)heap_caps_malloc(img_f * sizeof(float), MALLOC_CAP_INTERNAL);
+    if (!target.data) {
+        ESP_LOGE(TAG, "ERROR allocating target.data");
+        heap_caps_free(aligned_blob);
+        heap_caps_free(preprocessbuf);
+        return;
     }
 
-    FFT_buf = (float*)heap_caps_aligned_alloc(16, img_size*2*sizeof(float), MALLOC_CAP_SPIRAM);
-    if(!FFT_buf) {
-        ESP_LOGE(TAG, "couldn't allocate FFT_buf");
+
+    size_t spiram_size = sizeof(float) * (img_c * 8 + img_f * 2 * (NUM_TRANSFORMATIONS + 1) + img_f * 1); 
+    spiram_blob = heap_caps_malloc(spiram_size, MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "largest free spiram block: %d", heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    if (spiram_blob) {
+        float* ptr = (float*)spiram_blob;
+        filter = ptr; ptr += img_c;
+        A = ptr; ptr += img_c;
+        B = ptr; ptr += img_c;
+        A_inst = ptr; ptr += img_c;
+        B_inst = ptr; ptr += img_c;
+        frame_FT_buf = ptr; ptr += img_c;
+        gaussian_FT_buf = ptr; ptr += img_c;
+        gaussian_buf = ptr; ptr += img_c;
+        hann_window_2D = ptr; ptr += img_f;
+        f_i = ptr; ptr += img_f * (NUM_TRANSFORMATIONS + 1);
+        g_i = ptr; ptr += img_f * (NUM_TRANSFORMATIONS + 1);
+    }
+    else {
+        ESP_LOGE(TAG, "ERROR allocating spiram_blob");
+        heap_caps_free(aligned_blob);
+        heap_caps_free(preprocessbuf);
+        heap_caps_free(target.data);
+        return;
     }
 
-    FFT_trans_buf = (float*)heap_caps_aligned_alloc(16, img_size*2*sizeof(float), MALLOC_CAP_SPIRAM);
-    if(!FFT_trans_buf) {
-        ESP_LOGE(TAG, "couldn't allocate FFT_trans_buf");
-    }
 
-    hann_window_2D = (float*)heap_caps_malloc(img_size * sizeof(float), MALLOC_CAP_SPIRAM);
-    if(!hann_window_2D) {
-        ESP_LOGE(TAG, "couldn't allocate hann_window_2D");
-    }
-    
-    cropped_frame = (uint8_t*)heap_caps_malloc(img_size * sizeof(uint8_t), MALLOC_CAP_INTERNAL);
-    if(!cropped_frame) {
-        ESP_LOGE(TAG, "couldn't allocate cropped_frame");
+    for (int i = 0; i < 256; i++) {
+        log_lut[i] = logf((float)i + 1.0f);
     }
 
     size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -132,26 +117,10 @@ Tracker::Tracker() {
 }
 
 Tracker::~Tracker() {
-    free(target.data);
-
-    free(filter);
-    free(A);
-    free(B);
-
-    free(f_i);
-    free(g_i);
-
-    free(frame_conv_buf);
-    free(frame_FT_buf);
-    free(gaussian_buf);
-    free(gaussian_FT_buf);
-    free(A_inst);
-    free(B_inst);
-
-    free(FFT_buf);
-    free(FFT_trans_buf);
-    
-    free(hann_window_2D);
+    heap_caps_free(preprocessbuf);
+    heap_caps_free(target.data);
+    heap_caps_free(aligned_blob);
+    heap_caps_free(spiram_blob);
 }
 
 void Tracker::initTracker() {
@@ -162,82 +131,84 @@ void Tracker::initTracker() {
 void Tracker::generateFG() {
     //generates random affine transformations (set F) and associated 2d gaussian (set G)
     int x_shift_temp, y_shift_temp;
-    int rows = target.rows;
-    int cols = target.cols;
+    int rows = target.padded_height;
+    int cols = target.padded_width;
     int target_size = rows * cols;
     int stride = target_size * 2;
     //generate 2d gaussian for untransformed target
-    int x_0 = (int)round(cols/2.0f) - 1;
-    int y_0 = (int)round(rows/2.0f) - 1;
-    generate2dGaussian(g_i, cols, rows, x_0, y_0, 2, 2, 255);
+    int x_0 = (int)round(cols/2.0f);
+    int y_0 = (int)round(rows/2.0f);
+    generate2dGaussian(g_i, cols, rows, x_0, y_0, 2, 2, 1.0);
     generate2dHannWindow(hann_window_2D, rows, cols);
     //assign target to first index of f_i
     for (int i = 0; i < target_size; i++) {
-        f_i[i] = (float)target.data[i] * hann_window_2D[i];
+        f_i[i] = (float)target.data[i];
     } 
 
     //generate affine transformation and their associated gaussians
     for (int i = 0; i < NUM_TRANSFORMATIONS; i++) {
-       generateRandomAffine(target.data, f_i + stride * (i + 1), target.rows, target.cols, x_shift_temp, y_shift_temp);
-       shiftGaussian(g_i, g_i + stride * (i + 1), target.rows, target.cols, x_shift_temp, y_shift_temp); 
+        generateRandomAffine(target.data, f_i + stride * (i + 1), rows, cols, x_shift_temp, y_shift_temp);
+        shiftGaussian(g_i, g_i + stride * (i + 1), rows, cols, x_shift_temp, y_shift_temp); 
     }
 }
 
 void Tracker::generateInitialFilter() {
-   // need to add padding such that target dimensions are always powers of 2 I believe
-   int rows = target.rows;
-   int cols = target.cols;
-   size_t target_size = cols * rows;
-   int stride = target_size * 2;
-   float* F = (float*)heap_caps_malloc(target_size * 2 * sizeof(float) * (NUM_TRANSFORMATIONS + 1), MALLOC_CAP_SPIRAM);
-   float* G = (float*)heap_caps_malloc(target_size * 2 * sizeof(float) * (NUM_TRANSFORMATIONS + 1), MALLOC_CAP_SPIRAM);
+    // need to add padding such that target dimensions are always powers of 2 I believe
+    int rows = target.padded_height;
+    int cols = target.padded_width;
+    size_t target_size = cols * rows;
+    int stride = target_size * 2;
+    float* F = (float*)heap_caps_malloc(target_size * 2 * sizeof(float) * (NUM_TRANSFORMATIONS + 1), MALLOC_CAP_SPIRAM);
+    float* G = (float*)heap_caps_malloc(target_size * 2 * sizeof(float) * (NUM_TRANSFORMATIONS + 1), MALLOC_CAP_SPIRAM);
+    if (!F || !G) {
+        ESP_LOGE(TAG, "error allocated F or G in generateInitialFilter");
+    }
 
-   //need to cast target.data and gaussians
-   for(int i = 0; i < NUM_TRANSFORMATIONS + 1; i++) {
-       FFT2D(f_i + i * stride, &F[target_size * 2 * i], rows, cols, false);
-       FFT2D(g_i + i * stride, &G[target_size * 2 * i], rows, cols, false);
-   }
-    
-   float* numer_buf = (float*)heap_caps_malloc(target_size * 2 * sizeof(float), MALLOC_CAP_SPIRAM);
-   float* denom_buf = (float*)heap_caps_malloc(target_size * 2 * sizeof(float), MALLOC_CAP_SPIRAM);
+    //need to cast target.data and gaussians
+    for(int i = 0; i < NUM_TRANSFORMATIONS + 1; i++) {
+        FFT2D(f_i + i * stride, &F[target_size * 2 * i], rows, cols, false);
+        FFT2D(g_i + i * stride, &G[target_size * 2 * i], rows, cols, false);
+    }
 
-   elmWiseComplexMult(&G[0], &F[0], target_size, A, false, true);
-   elmWiseComplexMult(&F[0], &F[0], target_size, B, false, true);
+    float* numer_buf = (float*)heap_caps_malloc(target_size * 2 * sizeof(float), MALLOC_CAP_SPIRAM);
+    float* denom_buf = (float*)heap_caps_malloc(target_size * 2 * sizeof(float), MALLOC_CAP_SPIRAM);
 
-   for (int i = 0; i < NUM_TRANSFORMATIONS; i++) {
-       elmWiseComplexMult(&G[target_size * 2 * (i + 1)], &F[target_size * 2 * (i + 1)], target_size, numer_buf, false, true);
-       elmWiseComplexMult(&F[target_size * 2 * (i + 1)], &F[target_size * 2 * (i + 1)], target_size, denom_buf, false, true);
-       complexMatAdd(A, numer_buf, A, target_size);
-       complexMatAdd(B, denom_buf, B, target_size);
-   } 
-   matScalarRealAdd(B, reg, target_size);
-   elmWiseComplexDiv(A, B, target_size, filter);
+    if (!numer_buf || !denom_buf) {
+        ESP_LOGE(TAG, "error allocated numer or denom buf in generateInitialFilter");
+    }
+    elmWiseComplexMult(&G[0], &F[0], target_size, A, false, true);
+    elmWiseComplexMult(&F[0], &F[0], target_size, B, false, true);
 
-   free(numer_buf);
-   free(denom_buf);
-   free(F);
-   free(G);
+    for (int i = 0; i < NUM_TRANSFORMATIONS; i++) {
+        elmWiseComplexMult(&G[target_size * 2 * (i + 1)], &F[target_size * 2 * (i + 1)], target_size, numer_buf, false, true);
+        elmWiseComplexMult(&F[target_size * 2 * (i + 1)], &F[target_size * 2 * (i + 1)], target_size, denom_buf, false, true);
+        complexMatAdd(A, numer_buf, A, target_size);
+        complexMatAdd(B, denom_buf, B, target_size);
+    } 
+    matScalarRealAdd(B, reg, target_size);
+    elmWiseComplexDiv(A, B, target_size, filter);
+    matScalarRealAdd(B, -1 * reg, target_size);
+
+    heap_caps_free(numer_buf);
+    heap_caps_free(denom_buf);
+    heap_caps_free(F);
+    heap_caps_free(G);
 }
 
 void Tracker::updateFilter(uint8_t* frame) {
-    int rows = target.rows;
-    int cols = target.cols;
+    int rows = target.padded_height;
+    int cols = target.padded_width;
     int target_size = rows * cols;
 
-    cropFrameToTarget(frame, cropped_frame);
-
-    //convert frame to float and apply hann_window
-    for (int i = 0; i < target_size; i++) {
-        frame_conv_buf[i] = (float)cropped_frame[i] * hann_window_2D[i];
-    }
-
-    //FFT frame
-    FFT2D(frame_conv_buf, frame_FT_buf, rows, cols, false);
-
+    cropFrameToTarget(frame, preprocessbuf);
+    preprocessFrame(preprocessbuf);
+    FFT2D(target.data, frame_FT_buf, rows, cols, false);
     //generate tracking gaussian
     elmWiseComplexMult(frame_FT_buf, filter, target_size, gaussian_FT_buf, false, false);
-    IFFT2D(gaussian_FT_buf, gaussian_buf, rows, cols, false);
+    IFFT2D(gaussian_FT_buf, gaussian_buf, rows, cols);
     Coord peak = maxG(gaussian_buf, rows, cols);
+    float psr = calcPSR(gaussian_buf, rows, cols, peak, 5);
+    ESP_LOGI(TAG, "psr: %f", psr);
     Coord offset = {peak.x - cols/2, peak.y - rows/2};
     target.x_pos += offset.x;
     target.y_pos += offset.y;
@@ -247,19 +218,16 @@ void Tracker::updateFilter(uint8_t* frame) {
     if (target.y_pos < 0) {
         target.y_pos = 0;
     }
-    if (target.x_pos > (FRAME_WIDTH)) {
-        target.x_pos = FRAME_WIDTH;
+    if (target.x_pos > (FRAME_WIDTH - target.true_width)) {
+        target.x_pos = FRAME_WIDTH - target.true_width;
     }
-    if (target.y_pos > (FRAME_HEIGHT)) {
-        target.y_pos = FRAME_HEIGHT;
+    if (target.y_pos > (FRAME_HEIGHT - target.true_height)) {
+        target.y_pos = FRAME_HEIGHT - target.true_height;
     }
-    ESP_LOGI(TAG, "offset.x: %d, offset.y: %d, x_pos: %d, y_pos: %d", offset.x, offset.y, target.x_pos, target.y_pos);
-    cropFrameToTarget(frame, cropped_frame);
-    for (int i = 0; i < target_size; i++) {
-        frame_conv_buf[i] = (float)cropped_frame[i] * hann_window_2D[i];
-    }
-    FFT2D(frame_conv_buf, frame_FT_buf, rows, cols, false);
-    generate2dGaussian(gaussian_buf, cols, rows, cols/2, rows/2, 2, 2, 255);
+    cropFrameToTarget(frame, preprocessbuf);
+    preprocessFrame(preprocessbuf);
+    FFT2D(target.data, frame_FT_buf, rows, cols, false);
+    generate2dGaussian(gaussian_buf, cols, rows, cols/2, rows/2, 2, 2, 1.0);
     FFT2D(gaussian_buf, gaussian_FT_buf, rows, cols, false);
     elmWiseComplexMult(gaussian_FT_buf, frame_FT_buf, target_size, A_inst, false, true);
     elmWiseComplexMult(frame_FT_buf, frame_FT_buf, target_size, B_inst, false, true);
@@ -271,12 +239,13 @@ void Tracker::updateFilter(uint8_t* frame) {
     complexMatAdd(B_inst, B, B, target_size);
     matScalarRealAdd(B, reg, target_size);
     elmWiseComplexDiv(A, B, target_size, filter);
+    matScalarRealAdd(B, -1 * reg, target_size);
 }
-        
+
 void Tracker::cropFrameToTarget(uint8_t* frame, uint8_t* crop) {
     int source_width = FRAME_WIDTH;
-    int width = target.cols;
-    int height = target.rows;
+    int width = target.true_width;
+    int height = target.true_height;
     int x_init = target.x_pos;
     int y_init = target.y_pos;
 
@@ -292,7 +261,7 @@ void Tracker::cropFrameToTarget(uint8_t* frame, uint8_t* crop) {
 
 Coord Tracker::maxG(float* G, int rows, int cols) {
     //takes complex input, rows, cols wrt complex elements
-    float max = 0;
+    float max = -FLT_MAX;
     Coord max_coord = {0, 0};
     for (int i = 0; i < rows * cols; i++) {
         if (G[i * 2] > max) {
@@ -302,6 +271,30 @@ Coord Tracker::maxG(float* G, int rows, int cols) {
         }
     }
     return max_coord;
+}
+
+float Tracker::calcPSR(float* g, int rows, int cols, Coord peak_coord, int excl_thresh) {
+    //calculates peak to sidelobe ratio of g (interleaved complex), excl thresh denotes the side length of the area around the peak excluded from the calculation
+    int count = 0;
+    float mean = 0;
+    float M2 = 0;
+    float max = -FLT_MAX;
+    for (int i = 0; i < rows * cols; i++) {
+        int x = i % cols;
+        int y = i / cols;
+        if (g[i*2] > max) {
+            max = g[i*2];
+        }
+        if (abs(x - peak_coord.x) <= excl_thresh && abs(y - peak_coord.y) <= excl_thresh) {
+            continue;
+        }
+        count += 1;
+        float delta = g[i*2] - mean;
+        mean += delta/count;
+        M2 += delta * (g[i*2] - mean);
+    }
+    float stddev = sqrtf((float)M2/count);
+    return ((max - mean)/stddev);
 }
 
 void Tracker::matScalarRealAdd(float* inout, float scalar, int size) {
@@ -362,14 +355,62 @@ void Tracker::elmWiseComplexMult(float* in1, float* in2, int size, float* output
 
 }
 
-void Tracker::updateTarget(uint8_t* payload, size_t len, int rows, int cols, int x_pos, int y_pos) {
+void Tracker::preprocessFrame(uint8_t* frame) {
+    //takes a frame and then pads it using target.padded_width etc and stores the padded frame in target.data
+    int count = 0;
+    float mean = 0;
+    float M2 = 0;
+    int w = target.padded_width;
+    int h = target.padded_height;
+    int lower_x = (w - target.true_width)/2;
+    int upper_x = lower_x + target.true_width;
+    int lower_y = (h - target.true_height)/2;
+    int upper_y = lower_y + target.true_height;
+    for (int i = 0; i < w * h; i++) {
+        int x = i % w;
+        int y = i / w;
+        if (x < lower_x || x >= upper_x || y < lower_y || y >= upper_y) {
+            target.data[i] = 0;
+        }
+        else {
+            x = x - lower_x;
+            y = y - lower_y;
+            int index = y * target.true_width + x;
+            target.data[i] = log_lut[frame[index]]; 
+            count += 1;
+            float delta = target.data[i] - mean;
+            mean += delta/count;
+            M2 += delta * (target.data[i] - mean);
+        }
+    }
+    float stddev = sqrtf((float)M2/count);
+    for (int i = 0; i < w * h; i++) {
+        int x = i % w;
+        int y = i / w;
+        if (x < lower_x || x >= upper_x || y < lower_y || y >= upper_y) {
+            continue;
+        }
+        else {
+            target.data[i] = ((target.data[i] - mean)/stddev) * hann_window_2D[i];
+        }
+    }
+}
+
+void Tracker::updateTarget(uint8_t* payload, size_t len, int height, int width, int x_pos, int y_pos) {
     if(xSemaphoreTake(this->target_lock, portMAX_DELAY)) {
-        memcpy(target.data, payload, len);
-        target.rows = rows;
-        target.cols = cols;
+        memcpy(preprocessbuf, payload, len);
+        target.true_height = height;
+        target.true_width = width;
         target.x_pos = x_pos;
         target.y_pos = y_pos;
         xSemaphoreGive(target_lock);
+        int height_exp = ceil(log2(height));
+        target.padded_height = 1 << height_exp;
+        ESP_LOGI(TAG, "target.padded_height: %d", target.padded_height);
+        int width_exp = ceil(log2(width));
+        target.padded_width = 1 << width_exp;
+        ESP_LOGI(TAG, "target.padded_width: %d", target.padded_width);
+        preprocessFrame(preprocessbuf);
         initTracker();
         ESP_LOGI(TAG, "starting tracking..");
         isTracking = true;
@@ -424,7 +465,7 @@ void NOT_generateRandomAffine(uint8_t* input, uint8_t* output, int rows, int col
 }
 
 
-void Tracker::generateRandomAffine(uint8_t* input, float* output, int rows, int cols, int& x_shift_out, int& y_shift_out) {
+void Tracker::generateRandomAffine(float* input, float* output, int rows, int cols, int& x_shift_out, int& y_shift_out) {
     /* Applies a random transformation that simulates small changes in 
      * rotation, scaling, translation, blur, noise
      * rotation, scaling and translation achieved through affine transformation
@@ -536,14 +577,14 @@ void Tracker::shiftGaussian(float* input, float* output, int width, int height, 
     }
 }
 
-void Tracker::IFFT2D(float* input, float* output, int M, int N, bool complexInput) {
+void Tracker::IFFT2D(float* input, float* output, int M, int N) {
     //intended for use with complex input, M, N refer to complex elements, i.e. size of input in bytes is M*N*2*sizeof(float)
     int size = M*N; 
     //conjugate input
     for (int i = 0; i < size; i++) {
         input[i * 2 + 1] = -1 * input[i * 2 + 1];
     }
-    FFT2D(input, output, M, N, complexInput);
+    FFT2D(input, output, M, N, true);
     for (int i = 0; i < size; i ++) {
         output[i * 2] = (output[i * 2])/(M*N);
         output[i * 2 + 1] = (-1 * output[i * 2 + 1])/(M*N);
@@ -554,11 +595,6 @@ void Tracker::IFFT2D(float* input, float* output, int M, int N, bool complexInpu
 
 void Tracker::FFT2D(float* input, float* output, int M, int N, bool complexInput) { 
     esp_err_t ret;
-    ret = dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE);
-    if (ret  != ESP_OK) {
-        ESP_LOGE(TAG, "Not possible to initialize FFT. Error = %i", ret);
-        return;
-    }
 
     //transform input to array of form Re[0], Im[0], ... Re[N-1], Im[N-1]
     if (!complexInput) {
