@@ -3,6 +3,7 @@
 #include "esp_dsp.h"
 #include "randomutils.h"
 #include "freertos/idf_additions.h"
+#include "benchmark.h"
 
 #define NUM_TRANSFORMATIONS 4
 
@@ -28,6 +29,8 @@ class Tracker {
 
         bool isTracking = false; 
 
+        BenchmarkData bd; 
+
         void test();
 
         SemaphoreHandle_t target_lock;
@@ -39,6 +42,7 @@ class Tracker {
 
         void cropFrameToTarget(uint8_t* frame, uint8_t* crop);
     private:
+        const int TILE = 8;
         Target target; //data allocated internally
 
         void* aligned_blob = NULL;
@@ -58,6 +62,8 @@ class Tracker {
 
         float* f_i = NULL;
         float* g_i = NULL;
+        float* F = NULL;
+        float* G = NULL;
 
         float* frame_FT_buf = NULL;
         float* gaussian_buf = NULL;
@@ -83,8 +89,6 @@ class Tracker {
         void generate2dGaussian(float* output, int width, int height, int x_0, int y_0, int xsigma, int ysigma, float amplitude);
         void shiftGaussian(float* input, float* output, int width, int height, int x_shift, int y_shift);
         void generateRandomAffine(float* input, float* output, int rows, int cols, int& x_shift_out, int& y_shift_out);
-        void complexMult(float re1, float im1, float re2, float im2, float* out);
-        void complexDiv(float re1, float im1, float re2, float im2, float* out);
         void elmWiseComplexDiv(float* in1, float* in2, int size, float* output);
         void elmWiseComplexMult(float* in1, float* in2, int size, float* output, bool conjin1, bool conjin2);
         void complexMatAdd(float* in1, float* in2, float* out, int size);
@@ -94,6 +98,5 @@ class Tracker {
         float calcPSR(float* g, int rows, int cols, Coord peak_coord, int excl_thresh);
 };
 
-void NOT_randomAffineTransformation(uint8_t* input, uint8_t* output, int rows, int cols, float theta, float lambda, float x_shift, float y_shift);
 
 

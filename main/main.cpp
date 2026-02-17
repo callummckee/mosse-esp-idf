@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "esp_heap_caps.h"
+#include "esp_rom_sys.h"
 #include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
 #include "esp_dsp.h"
@@ -9,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "esp_camera.h"
 #include "nvs_flash.h"
+#include "esp_timer.h"
 
 #include "randomutils.h"
 #include "sensor.h"
@@ -16,6 +18,7 @@
 #include "config.h"
 #include "server.h"
 #include "pins.h"
+#include "benchmark.h"
 
 struct SystemContext {
     Server* server;
@@ -46,7 +49,7 @@ static camera_config_t get_camera_config() {
     config.pin_href = HREF_GPIO_NUM;
     config.pin_pclk = PCLK_GPIO_NUM;
 
-    config.xclk_freq_hz = 10000000; 
+    config.xclk_freq_hz = 20000000; 
 
     config.ledc_timer = LEDC_TIMER_1; //servos use timer 1 as they have different clock frequency
     config.ledc_channel = LEDC_CHANNEL_2; //servos use channels 0 and 1
@@ -61,7 +64,21 @@ static camera_config_t get_camera_config() {
     return config;
 }
 
+struct mainBenchmarkData {
+    uint64_t updateFilter_cycles = 0;
+    uint64_t update_frame_cycles = 0; 
+    uint64_t updateTargetPOS_cycles = 0;
+    uint64_t send_frame_cycles = 0;
+
+    uint32_t avg_updateFilter = 0;
+    uint32_t avg_update_frame = 0;
+    uint32_t avg_updateTargetPOS = 0;
+    uint32_t avg_send_frame = 0;
+    uint32_t frame_count = 0;
+};
+
 void camera_task(void* pvParameters){
+    mainBenchmarkData mbd;
     SystemContext* sysctx = (SystemContext*)pvParameters;
     Tracker* tracker = sysctx->tracker;
     Server* server = sysctx->server;
@@ -69,6 +86,7 @@ void camera_task(void* pvParameters){
     ESP_LOGI(TAG, "starting loop");
 
     while(1) {
+        int64_t start = esp_timer_get_time();
         camera_fb_t* fb = esp_camera_fb_get();
         if (!fb) {
             ESP_LOGE(TAG, "frame buffer could not be acquired");
@@ -76,20 +94,58 @@ void camera_task(void* pvParameters){
             continue;
         }
         if (tracker->isTracking) {
-            tracker->updateFilter(fb->buf);
-            server->update_frame(fb);
-            server->updateTargetPOS(tracker->getTargetPOS());
+            {
+                Benchmarker b(&mbd.updateFilter_cycles);
+                tracker->updateFilter(fb->buf);
+            }
+            {
+                Benchmarker b(&mbd.update_frame_cycles);
+                server->update_frame(fb);
+            }
+            {
+                Benchmarker b(&mbd.updateTargetPOS_cycles);
+                server->updateTargetPOS(tracker->getTargetPOS());
+            }
             if (!server->pp.reader_busy) {
-                server->send_frame();
+                {
+                    Benchmarker b(&mbd.send_frame_cycles);
+                    server->send_frame();
+                }
             }
         }
         else {
-            server->update_frame(fb);
+
+            {
+                Benchmarker b(&mbd.update_frame_cycles);
+                server->update_frame(fb);
+            }
             if (!server->pp.reader_busy) {
-                server->send_frame();
+                {
+                    Benchmarker b(&mbd.send_frame_cycles);
+                    server->send_frame();
+                }
             }
         }
         esp_camera_fb_return(fb);
+        int64_t end = esp_timer_get_time();
+        float fps = 1.0/((end - start)/1000000.0);
+        ESP_LOGI(TAG, "FPS: %f", fps);
+        mbd.frame_count++;
+        if (mbd.frame_count > 100) {
+            mbd.avg_updateFilter = mbd.updateFilter_cycles/100;
+            mbd.avg_update_frame = mbd.update_frame_cycles/100;
+            mbd.avg_updateTargetPOS = mbd.updateTargetPOS_cycles/100;
+            mbd.avg_send_frame = mbd.send_frame_cycles/100;
+
+           mbd.updateFilter_cycles = 0;
+           mbd.update_frame_cycles = 0;
+           mbd.updateTargetPOS_cycles = 0;
+           mbd.send_frame_cycles = 0;
+           mbd.frame_count = 0;
+
+           esp_rom_printf("updateFilter: %lu\nupdate_frame: %lu\nupdateTarget: %lu\nsend_frame: %lu\n", mbd.avg_updateFilter, mbd.avg_update_frame, mbd.avg_updateTargetPOS, mbd.avg_send_frame);
+        }
+
         vTaskDelay(1);
     }
 }

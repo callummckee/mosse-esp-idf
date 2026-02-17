@@ -1,6 +1,9 @@
 const frameWidth = 160;
 const frameHeight = 120;
 const buf_size = 300;
+const maxTargetWidth = 2**(Math.floor(Math.log2(frameWidth)));
+const maxTargetHeight = 2**(Math.floor(Math.log2(frameHeight)));
+console.log(`maxTargetWidth ${maxTargetWidth}, maxTargetHeight ${maxTargetHeight}`);
 
 const frameHistory = new Array(buf_size);
 
@@ -103,16 +106,23 @@ drawCanvas.addEventListener('mousedown', (e) => {
 drawCanvas.addEventListener('mousemove', (e) => {
     if (!isDrawing) return;
 
-    const currentX = e.offsetX * (drawCanvas.width / drawCanvas.clientWidth);
-    const currentY = e.offsetY * (drawCanvas.height / drawCanvas.clientHeight);
+    let currentX = e.offsetX * (drawCanvas.width / drawCanvas.clientWidth);
+    let currentY = e.offsetY * (drawCanvas.height / drawCanvas.clientHeight);
 
-    // Clear previous rectangle
+    let dx = currentX - startX;
+    if (Math.abs(dx) > maxTargetWidth) {
+        currentX = startX + Math.sign(dx) * maxTargetWidth;
+    }
+
+    let dy = currentY - startY;
+    if (Math.abs(dy) > maxTargetHeight) {
+        currentY = startY + Math.sign(dy) * maxTargetHeight;
+    }
+
     drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-
-    // Draw new selection box
     drawCtx.strokeStyle = '#00ffcc';
     drawCtx.lineWidth = 1;
-    drawCtx.setLineDash([2, 2]); // "Marching Ants" look
+    drawCtx.setLineDash([2, 2]);
     drawCtx.strokeRect(startX, startY, currentX - startX, currentY - startY);
 });
 
@@ -121,8 +131,18 @@ drawCanvas.addEventListener('mouseup', (e) => {
     isDrawing = false;
     canConfirm = true;
 
-    const endX = e.offsetX * (drawCanvas.width / drawCanvas.clientWidth);
-    const endY = e.offsetY * (drawCanvas.height / drawCanvas.clientHeight);
+    let endX = e.offsetX * (drawCanvas.width / drawCanvas.clientWidth);
+    let endY = e.offsetY * (drawCanvas.height / drawCanvas.clientHeight);
+
+    let dx = endX - startX;
+    if (Math.abs(dx) > maxTargetWidth) {
+        endX = startX + Math.sign(dx) * maxTargetWidth;
+    }
+
+    let dy = endY - startY;
+    if (Math.abs(dy) > maxTargetHeight) {
+        endY = startY + Math.sign(dy) * maxTargetHeight;
+    }
 
     drawRoi = {
         x: Math.round(Math.min(startX, endX)),
@@ -133,6 +153,3 @@ drawCanvas.addEventListener('mouseup', (e) => {
 
     console.log("ROI Selected (Sensor Coords):", drawRoi);
 });
-
-// my current thinking on this is we don't pause, we store the last \approx 300 frames in a circular buffer that we access and send back to the esp32 when confirmed perhaps by click in the stream canvas, image needs to be padded up to the next square power of 2 for optimisation on the esp32, browser will do the padding
-// TOMORROW LETS SEND PORTION OUT THE SELECTED FRAME AND SEND IT BACK TO THE ESP32
