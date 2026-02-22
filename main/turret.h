@@ -56,9 +56,9 @@ class Turret {
         const ledc_channel_t tilt_channel = LEDC_CHANNEL_1;
     private: 
         const float pan_min_angle = 0.0;
-        const float pan_max_angle = 0.0;
+        const float pan_max_angle = 180;
         const float tilt_min_angle = 0.0;
-        const float tilt_max_angle = 0.0;
+        const float tilt_max_angle = 90;
 
         SemaphoreHandle_t configMutex = NULL;
 

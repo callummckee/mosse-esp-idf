@@ -112,7 +112,7 @@ void camera_task(void* pvParameters){
                     server->send_frame();
                 }
             }
-            int64_t dt = esp_timer_get_time() - start;
+            int64_t dt = (esp_timer_get_time() - start)/1000000.0f;
             turret->move(tracker->offset.x, dt, turret->pan_channel);
             turret->move(tracker->offset.y, dt, turret->tilt_channel);
         }

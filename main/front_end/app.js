@@ -86,6 +86,9 @@ document.addEventListener('keydown', async (e) => {
             confirmed = false;
             confirmedFrame = -1;
             confirmCtx.clearRect(0, 0, confirmedCanvas.width, confirmedCanvas.height);
+            const combinedData = new Uint8Array(1);
+            combinedData[0] = 0;
+            target_socket.send(combinedData.buffer);
         }
         else if (canConfirm) {
             confirmed = true;

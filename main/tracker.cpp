@@ -231,18 +231,25 @@ void Tracker::updateFilter(uint8_t* frame) {
 
 void Tracker::cropFrameToTarget(uint8_t* frame, uint8_t* crop) {
     int source_width = FRAME_WIDTH;
-    int width = target.true_width;
-    int height = target.true_height;
-    int x_init = target.x_pos;
-    int y_init = target.y_pos;
+    int source_height = FRAME_HEIGHT; 
+    int width = target.padded_width;
+    int height = target.padded_height;
+
+    int x_init = target.x_pos - (width - target.true_width) / 2;
+    int y_init = target.y_pos - (height - target.true_height) / 2;
 
     for (int i = 0; i < width * height; i++) {
         int x_dest = i % width;
         int y_dest = i / width;
         int x_source = x_dest + x_init;
         int y_source = y_dest + y_init;
-        int source_index = y_source * source_width + x_source;
-        crop[i] = frame[source_index]; 
+
+        if (x_source < 0 || x_source >= source_width || y_source < 0 || y_source >= source_height) {
+            crop[i] = 0;
+        } else {
+            int source_index = y_source * source_width + x_source;
+            crop[i] = frame[source_index]; 
+        }
     }
 }
 
@@ -272,7 +279,12 @@ float Tracker::calcPSR(float* g, int rows, int cols, Coord peak_coord, int excl_
         if (g[i*2] > max) {
             max = g[i*2];
         }
-        if (abs(x - peak_coord.x) <= excl_thresh && abs(y - peak_coord.y) <= excl_thresh) {
+        int dx = abs(x - peak_coord.x);
+        int dy = abs(y - peak_coord.y);
+        dx = (dx > cols / 2) ? cols - dx : dx;
+        dy = (dy > rows / 2) ? rows - dy : dy;
+
+        if (dx <= excl_thresh && dy <= excl_thresh) {
             continue;
         }
         count += 1;
@@ -280,7 +292,12 @@ float Tracker::calcPSR(float* g, int rows, int cols, Coord peak_coord, int excl_
         mean += delta/count;
         M2 += delta * (g[i*2] - mean);
     }
+    ESP_LOGI(TAG, "M2: %f, count: %d", M2, count);
     float stddev = sqrtf((float)M2/count);
+    ESP_LOGI(TAG, "PSR stddev: %f", stddev);
+    if (stddev < 1e-5f) {
+        stddev = 1e-5f; 
+    }
     return ((max - mean)/stddev);
 }
 
@@ -349,54 +366,34 @@ void Tracker::preprocessFrame(uint8_t* frame) {
     float M2 = 0;
     int w = target.padded_width;
     int h = target.padded_height;
-    int lower_x = (w - target.true_width)/2;
-    int upper_x = lower_x + target.true_width;
-    int lower_y = (h - target.true_height)/2;
-    int upper_y = lower_y + target.true_height;
     for (int i = 0; i < w * h; i++) {
-        int x = i % w;
-        int y = i / w;
-        if (x < lower_x || x >= upper_x || y < lower_y || y >= upper_y) {
-            target.data[i] = 0;
-        }
-        else {
-            x = x - lower_x;
-            y = y - lower_y;
-            int index = y * target.true_width + x;
-            target.data[i] = log_lut[frame[index]]; 
-            count += 1;
-            float delta = target.data[i] - mean;
-            mean += delta/count;
-            M2 += delta * (target.data[i] - mean);
-        }
+        target.data[i] = log_lut[frame[i]]; 
+        count += 1;
+        float delta = target.data[i] - mean;
+        mean += delta/count;
+        M2 += delta * (target.data[i] - mean);
     }
     float stddev = sqrtf((float)M2/count);
+    if (stddev < 1e-5f) {
+        stddev = 1e-5f; 
+    }
     for (int i = 0; i < w * h; i++) {
-        int x = i % w;
-        int y = i / w;
-        if (x < lower_x || x >= upper_x || y < lower_y || y >= upper_y) {
-            continue;
-        }
-        else {
-            target.data[i] = ((target.data[i] - mean)/stddev) * hann_window_2D[i];
-        }
+        target.data[i] = ((target.data[i] - mean)/stddev) * hann_window_2D[i];
     }
 }
 
 void Tracker::updateTarget(uint8_t* payload, size_t len, int height, int width, int x_pos, int y_pos) {
     if(xSemaphoreTake(this->target_lock, portMAX_DELAY)) {
-        memcpy(preprocessbuf, payload, len);
         target.true_height = height;
         target.true_width = width;
         target.x_pos = x_pos;
         target.y_pos = y_pos;
-        xSemaphoreGive(target_lock);
         int height_exp = ceil(log2(height));
         target.padded_height = 1 << height_exp;
-        ESP_LOGI(TAG, "target.padded_height: %d", target.padded_height);
         int width_exp = ceil(log2(width));
         target.padded_width = 1 << width_exp;
-        ESP_LOGI(TAG, "target.padded_width: %d", target.padded_width);
+        xSemaphoreGive(target_lock);
+        cropFrameToTarget(payload, preprocessbuf);
         preprocessFrame(preprocessbuf);
         initTracker();
         ESP_LOGI(TAG, "starting tracking..");

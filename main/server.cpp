@@ -332,15 +332,18 @@ esp_err_t Server::target_socket_handler(httpd_req_t* req) {
             return ESP_ERR_NO_MEM;
         }
         ws_pkt.payload = buf;
-        /* Set max_len = ws_pkt.len to get the frame payload */
         ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "httpd_ws_recv_frame failed with %d", ret);
-            free(buf);
+            heap_caps_free(buf);
             return ret;
         }
-
-        tracker->updateTarget(&(buf[4]), ws_pkt.len - 4, buf[0], buf[1], buf[2], buf[3]);
+        if (buf[0] == 0) {
+            tracker->isTracking = false;
+        }
+        else {
+            tracker->updateTarget(&(buf[4]), ws_pkt.len - 4, buf[0], buf[1], buf[2], buf[3]);
+        }
         heap_caps_free(buf);
     }
     return ESP_OK;
