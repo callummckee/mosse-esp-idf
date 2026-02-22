@@ -182,7 +182,7 @@ void Tracker::updateFilter(uint8_t* frame) {
     Coord peak = maxG(gaussian_buf, rows, cols);
     float psr = calcPSR(gaussian_buf, rows, cols, peak, 5);
     ESP_LOGI(TAG, "psr: %f", psr);
-    Coord offset = {peak.x - cols/2, peak.y - rows/2};
+    offset = {peak.x - cols/2, peak.y - rows/2};
     target.x_pos += offset.x;
     target.y_pos += offset.y;
     if (target.x_pos < 0) {

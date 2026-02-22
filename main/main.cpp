@@ -19,10 +19,13 @@
 #include "server.h"
 #include "pins.h"
 #include "benchmark.h"
+#include "turret.h"
 
 struct SystemContext {
+    Config* config;
     Server* server;
     Tracker* tracker;
+    Turret* turret;
 };
 
 
@@ -66,13 +69,9 @@ static camera_config_t get_camera_config() {
 
 struct mainBenchmarkData {
     uint64_t updateFilter_cycles = 0;
-    uint64_t update_frame_cycles = 0; 
-    uint64_t updateTargetPOS_cycles = 0;
     uint64_t send_frame_cycles = 0;
 
     uint32_t avg_updateFilter = 0;
-    uint32_t avg_update_frame = 0;
-    uint32_t avg_updateTargetPOS = 0;
     uint32_t avg_send_frame = 0;
     uint32_t frame_count = 0;
 };
@@ -82,6 +81,8 @@ void camera_task(void* pvParameters){
     SystemContext* sysctx = (SystemContext*)pvParameters;
     Tracker* tracker = sysctx->tracker;
     Server* server = sysctx->server;
+    Turret* turret = sysctx->turret;
+    Config* config = sysctx->config;
 
     ESP_LOGI(TAG, "starting loop");
 
@@ -93,32 +94,30 @@ void camera_task(void* pvParameters){
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
+        if (config->newcfg) {
+            turret->applyPIDConfig(config->syscfg);
+            ESP_LOGI(TAG, "applied pid:\nPAN\np: %f i:%f d:%f\nTILT\np: %f i:%f d:%f", turret->panpid.kp,turret->panpid.ki, turret->panpid.kd,turret->tiltpid.kp, turret->tiltpid.ki, turret->tiltpid.kd);
+            config->newcfg = false;
+        }
         if (tracker->isTracking) {
             {
                 Benchmarker b(&mbd.updateFilter_cycles);
                 tracker->updateFilter(fb->buf);
             }
-            {
-                Benchmarker b(&mbd.update_frame_cycles);
-                server->update_frame(fb);
-            }
-            {
-                Benchmarker b(&mbd.updateTargetPOS_cycles);
-                server->updateTargetPOS(tracker->getTargetPOS());
-            }
+            server->update_frame(fb);
+            server->updateTargetPOS(tracker->getTargetPOS()); // this is clunky?
             if (!server->pp.reader_busy) {
                 {
                     Benchmarker b(&mbd.send_frame_cycles);
                     server->send_frame();
                 }
             }
+            int64_t dt = esp_timer_get_time() - start;
+            turret->move(tracker->offset.x, dt, turret->pan_channel);
+            turret->move(tracker->offset.y, dt, turret->tilt_channel);
         }
         else {
-
-            {
-                Benchmarker b(&mbd.update_frame_cycles);
-                server->update_frame(fb);
-            }
+            server->update_frame(fb);
             if (!server->pp.reader_busy) {
                 {
                     Benchmarker b(&mbd.send_frame_cycles);
@@ -133,17 +132,13 @@ void camera_task(void* pvParameters){
         mbd.frame_count++;
         if (mbd.frame_count > 100) {
             mbd.avg_updateFilter = mbd.updateFilter_cycles/100;
-            mbd.avg_update_frame = mbd.update_frame_cycles/100;
-            mbd.avg_updateTargetPOS = mbd.updateTargetPOS_cycles/100;
             mbd.avg_send_frame = mbd.send_frame_cycles/100;
 
            mbd.updateFilter_cycles = 0;
-           mbd.update_frame_cycles = 0;
-           mbd.updateTargetPOS_cycles = 0;
            mbd.send_frame_cycles = 0;
            mbd.frame_count = 0;
 
-           esp_rom_printf("updateFilter: %lu\nupdate_frame: %lu\nupdateTarget: %lu\nsend_frame: %lu\n", mbd.avg_updateFilter, mbd.avg_update_frame, mbd.avg_updateTargetPOS, mbd.avg_send_frame);
+           esp_rom_printf("updateFilter: %lu\nsend_frame: %lu\n", mbd.avg_updateFilter, mbd.avg_send_frame);
         }
 
         vTaskDelay(1);
@@ -166,11 +161,23 @@ extern "C" void app_main(void) {
         return;
     }
 
+    Config* config = new Config();
     Tracker* tracker = new Tracker();
-    Server* server = new Server(tracker);
+    Server* server = new Server(tracker, config);
+    Turret* turret = new Turret();
     SystemContext* sysctx = new SystemContext;
+    sysctx->config = config;
     sysctx->server = server;
     sysctx->tracker = tracker;
+    sysctx->turret = turret;
+
+    if (config->loadConfig()) {
+        turret->applyPIDConfig(config->syscfg);
+    }
+    else {
+        turret->applyPIDConfig(config->dfltcfg);
+    }
+    
 
     server->wifi_init_sta();
     start_mdns(); //move this inside a class? 
@@ -179,6 +186,8 @@ extern "C" void app_main(void) {
     server->register_handler("/app.js", HTTP_GET, Server::app_js_handler_tramp); 
     server->register_handler("/stream_ws", HTTP_GET, Server::stream_socket_handler_tramp, true);
     server->register_handler("/target_ws", HTTP_GET, Server::target_socket_handler_tramp, true);
+    server->register_handler("/cfg", HTTP_GET, Server::cfg_handler_tramp);
+    server->register_handler("/update", HTTP_POST, Server::update_handler_tramp);
 
     ESP_LOGI(TAG, "creating camera task");
     xTaskCreatePinnedToCore(camera_task, "Camera Task", 1024 * 8, sysctx, 5, server->xCameraTaskHandle, 1);

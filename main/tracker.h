@@ -41,6 +41,7 @@ class Tracker {
         Coord getTargetPOS();
 
         void cropFrameToTarget(uint8_t* frame, uint8_t* crop);
+        Coord offset = {};
     private:
         const int TILE = 8;
         Target target; //data allocated internally

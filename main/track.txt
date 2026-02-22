@@ -1,0 +1,21 @@
+no tile transposing:
+
+cropprocess: 2518585
+fft: 7942293
+ifft: 9873968
+mult: 1386835
+
+tile transposing: 
+
+cropprocess: 2520249
+fft: 6620625
+ifft: 8520459
+mult: 1397236
+
+matrix math function inlining:
+
+cropprocess: 2527935
+fft: 6570287
+ifft: 8506321
+mult: 1316240
+

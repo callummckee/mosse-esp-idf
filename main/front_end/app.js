@@ -27,6 +27,33 @@ let confirmed = false;
 let drawRoi, confirmRoi;
 let pos_x, pos_y
 
+window.onload = async () => {
+    const response = await fetch('/cfg');
+    const data = await response.json();
+    document.querySelector('[name="pan_kp"]').value = data.pan_kp.toFixed(4);
+    document.querySelector('[name="tilt_kp"]').value = data.tilt_kp.toFixed(4);
+    document.querySelector('[name="pan_kd"]').value = data.pan_kd.toFixed(4);
+    document.querySelector('[name="tilt_kd"]').value = data.tilt_kd.toFixed(4);
+    document.querySelector('[name="pan_ki"]').value = data.pan_ki.toFixed(4);
+    document.querySelector('[name="tilt_ki"]').value = data.tilt_ki.toFixed(4);
+};
+
+const form = document.getElementById('paramForm');
+form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+
+    const formData = new FormData(form);
+    const data = Object.fromEntries(formData);
+
+    for (let key in data) data[key] = parseFloat(data[key]) || 0;
+    await fetch('/update', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data) 
+    });
+});
+
+
 stream_socket.onmessage = async function(event) {
     const buffer = await event.data.arrayBuffer();
     const pixels = new Uint8Array(buffer);

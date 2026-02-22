@@ -35,7 +35,7 @@ class JPEGEnc {
 
 class Server {
     public:
-        Server(Tracker* t);
+        Server(Tracker* t, Config* c);
         ~Server();
 
         TaskHandle_t* xCameraTaskHandle = NULL;
@@ -56,6 +56,8 @@ class Server {
         static esp_err_t target_socket_handler_tramp(httpd_req_t* req); 
         static esp_err_t page_handler_tramp(httpd_req_t* req);
         static esp_err_t receive_handler_tramp(httpd_req_t* req);
+        static esp_err_t cfg_handler_tramp(httpd_req_t* req);
+        static esp_err_t update_handler_tramp(httpd_req_t* req);
 
         esp_err_t register_handler(const char* uri, httpd_method_t method, esp_err_t (*handler_trampoline)(httpd_req_t*), bool websocket = false);
 
@@ -66,6 +68,8 @@ class Server {
         int stream_fd = -1;
         int target_fd = -1;
     private:
+        Config* cfg;
+
         JPEGEnc jpegenc = {};
         SemaphoreHandle_t target_lock;
         httpd_handle_t serverhandle = nullptr;
@@ -86,6 +90,8 @@ class Server {
         esp_err_t target_socket_handler(httpd_req_t* req);
         esp_err_t page_handler(httpd_req_t* req);
         esp_err_t receive_handler(httpd_req_t* req);
+        esp_err_t cfg_handler(httpd_req_t* req);
+        esp_err_t update_handler(httpd_req_t* req);
 
         static void ws_send_stream(void *arg);
         static void ws_send_target(void* arg);

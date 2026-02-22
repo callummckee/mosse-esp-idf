@@ -58,9 +58,11 @@ jpeg_error_t JPEGEnc::encode(uint8_t* inbuf, uint8_t* outbuf) {
     return err;
 }
 
-Server::Server(Tracker* t) {
+Server::Server(Tracker* t, Config* c) {
     int img_size = FRAME_WIDTH * FRAME_HEIGHT;
     tracker = t;
+    cfg = c;
+
     pp.pingpong_lock = xSemaphoreCreateMutex();
     if (pp.pingpong_lock == NULL) {
         ESP_LOGE("server", "failed to create frame_lock semaphore");
@@ -228,7 +230,7 @@ esp_err_t Server::page_handler_tramp(httpd_req_t* req) {
 
 esp_err_t Server::page_handler(httpd_req_t* req) {
     const size_t html_len = index_html_end - index_html_start;
-
+;
     httpd_resp_send(req, (const char*)index_html_start, html_len);
     return ESP_OK;
 }
@@ -392,4 +394,121 @@ void Server::updateTargetPOS(Coord tp) {
         xSemaphoreGive(target_pos_lock);
     }
 }
+esp_err_t Server::cfg_handler_tramp(httpd_req_t* req) {
 
+    Server* self = static_cast<Server*>(req->user_ctx);
+
+    if(!self) {
+        return ESP_FAIL;
+    }
+    else {
+        return self->cfg_handler(req);
+    }
+}
+
+esp_err_t Server::cfg_handler(httpd_req_t* req) {
+
+    cJSON *root = cJSON_CreateObject();
+
+    if (xSemaphoreTake(cfg->configMutex, pdMS_TO_TICKS(100))) {
+        cJSON_AddNumberToObject(root, "pan_kp", cfg->syscfg.pan_kp);
+        cJSON_AddNumberToObject(root, "tilt_kp", cfg->syscfg.tilt_kp);
+        cJSON_AddNumberToObject(root, "pan_kd", cfg->syscfg.pan_kd);
+        cJSON_AddNumberToObject(root, "tilt_kd", cfg->syscfg.tilt_kd);
+        cJSON_AddNumberToObject(root, "pan_ki", cfg->syscfg.pan_ki);
+        cJSON_AddNumberToObject(root, "tilt_ki", cfg->syscfg.tilt_ki);
+        xSemaphoreGive(cfg->configMutex);
+    }
+    else {
+        cJSON_AddNumberToObject(root, "pan_kp", cfg->dfltcfg.pan_kp);
+        cJSON_AddNumberToObject(root, "tilt_kp", cfg->dfltcfg.tilt_kp);
+        cJSON_AddNumberToObject(root, "pan_kd", cfg->dfltcfg.pan_kd);
+        cJSON_AddNumberToObject(root, "tilt_kd", cfg->dfltcfg.tilt_kd);
+        cJSON_AddNumberToObject(root, "pan_ki", cfg->dfltcfg.pan_ki);
+        cJSON_AddNumberToObject(root, "tilt_ki", cfg->dfltcfg.tilt_ki);
+    }
+
+    char* json_string = cJSON_Print(root);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_string, strlen(json_string));
+
+    cJSON_Delete(root);
+    free(json_string);
+
+    return ESP_OK;
+}
+
+esp_err_t Server::update_handler_tramp(httpd_req_t* req) {
+
+    Server* self = static_cast<Server*>(req->user_ctx);
+
+    if(!self) {
+        return ESP_FAIL;
+    }
+    else {
+        return self->update_handler(req);
+    }
+}
+
+esp_err_t Server::update_handler(httpd_req_t* req) {
+
+    char buf[100];
+    int ret, remaining = req->content_len;
+
+    while (remaining > 0) {
+        if ((ret = httpd_req_recv(req, buf, MIN(remaining, sizeof(buf)))) <= 0) {
+          if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+              continue;
+          }
+          return ESP_FAIL;
+        }
+        remaining -= ret;
+
+        ESP_LOGI(TAG, "Received Data");
+        ESP_LOGI(TAG, "%.*s", ret, buf);
+    }
+
+    cJSON *root = cJSON_Parse(buf);
+    if (root == NULL) {
+        return ESP_FAIL;
+    }
+    
+    cJSON *pan_kp_item = cJSON_GetObjectItem(root, "pan_kp");
+    cJSON *tilt_kp_item = cJSON_GetObjectItem(root, "tilt_kp");
+    cJSON *pan_kd_item = cJSON_GetObjectItem(root, "pan_kd");
+    cJSON *tilt_kd_item = cJSON_GetObjectItem(root, "tilt_kd");
+    cJSON *pan_ki_item = cJSON_GetObjectItem(root, "pan_ki");
+    cJSON *tilt_ki_item = cJSON_GetObjectItem(root, "tilt_ki");
+    
+
+    if (xSemaphoreTake(cfg->configMutex, pdMS_TO_TICKS(100))) {
+        if (cJSON_IsNumber(pan_kp_item)) {
+            cfg->syscfg.pan_kp = pan_kp_item->valuedouble;
+        }
+        if (cJSON_IsNumber(tilt_kp_item)) {
+            cfg->syscfg.tilt_kp = tilt_kp_item->valuedouble;
+        }
+        if (cJSON_IsNumber(pan_kd_item)) {
+            cfg->syscfg.pan_kd = pan_kd_item->valuedouble;
+        }
+        if (cJSON_IsNumber(tilt_kd_item)) {
+            cfg->syscfg.tilt_kd = tilt_kd_item->valuedouble;
+        }
+        if (cJSON_IsNumber(pan_ki_item)) {
+            cfg->syscfg.pan_ki = pan_ki_item->valuedouble;
+        }
+        if (cJSON_IsNumber(tilt_ki_item)) {
+            cfg->syscfg.tilt_ki = tilt_ki_item->valuedouble;
+        }
+        xSemaphoreGive(cfg->configMutex);
+        cfg->saveConfigToNVS();
+        cfg->newcfg = true;
+    }
+
+    cJSON_Delete(root);
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_send(req, NULL, 0); 
+    
+    return ESP_OK;
+}

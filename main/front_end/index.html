@@ -63,6 +63,36 @@ canvas {
     </head>
 
     <body>
+
+        <div class="controls-group">
+            <form action="/update" method="POST" id="paramForm">
+                <div class="form-group">
+                    <label for="tilt_kp"> tilt_kp </label>
+                    <input type="number" name="tilt_kp" id="tilt_kp" step="0.0001">
+                </div>
+                <div class="form-group">
+                    <label for="pan_kp"> pan_kp </label>
+                    <input type="number" name="pan_kp" id="pan_kp" step="0.0001">
+                </div>
+                <div class="form-group">
+                    <label for="tilt_kd"> tilt_kd </label>
+                    <input type="number" name="tilt_kd" id="tilt_kd" step="0.0001">
+                </div>
+                <div class="form-group">
+                    <label for="pan_kd"> pan_kd </label>
+                    <input type="number" name="pan_kd" id="pan_kd" step="0.0001">
+                </div>
+                <div class="form-group">
+                    <label for="tilt_ki"> tilt_ki </label>
+                    <input type="number" name="tilt_ki" id="tilt_ki" step="0.0001">
+                </div>
+                <div class="form-group">
+                    <label for="pan_ki"> pan_ki </label>
+                    <input type="number" name="pan_ki" id="pan_ki" step="0.0001">
+                </div>
+                <input type="submit" value="Save Parameters">
+            </form>
+        </div>
         <div class = "main_stream">
             <canvas id="stream_canvas" width="160" height="120"></canvas>
             <canvas id="draw_canvas" width="160" height="120"></canvas>
