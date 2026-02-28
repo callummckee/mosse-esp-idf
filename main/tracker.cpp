@@ -28,57 +28,61 @@ const int lambda_mean = 1;
 const float lambda_sigma = 0.5;
 const float x_shift_sigma = 0.15;
 const float y_shift_sigma = 0.15;
-const float reg = 0.01;
+const float reg = 0.001;
 const float learning_rate = 0.125;
 
 
-static const char* TAG = "mosse.cpp";
+static const char* TAG = "tracker.cpp";
 
-Tracker::Tracker() {
+Tracker::Tracker(Turret* t) {
+    turret = t;
     target_lock = xSemaphoreCreateMutex();
     assert(target_lock != NULL && "FATAL: failed to create target_lock semaphore");
 
     esp_err_t ret = dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE);
     assert(ret == ESP_OK && "FATAL: failed to init fft table");
 
-    size_t img_f = FRAME_WIDTH * FRAME_HEIGHT;
-    size_t img_c = img_f * 2;
+    size_t target_size = MAX_TARGET_HEIGHT * MAX_TARGET_WIDTH;
+    size_t target_size_c = target_size * 2;
 
-    size_t aligned_size = img_c * 2 * sizeof(float);
+    size_t aligned_size = target_size_c * 2 * sizeof(float);
     aligned_blob = heap_caps_aligned_alloc(16, aligned_size, MALLOC_CAP_SPIRAM);
+
     assert(aligned_blob != NULL && "FATAL: failed to allocate aligned blob");
     FFT_buf = (float*)aligned_blob;
-    FFT_trans_buf = FFT_buf + img_c;
+    FFT_trans_buf = FFT_buf + target_size_c;
 
-    preprocessbuf = (uint8_t*)heap_caps_malloc(img_f * sizeof(uint8_t), MALLOC_CAP_INTERNAL);
-    assert(preprocessbuf != NULL && "FATAL: failed to allocate preprocess buf");
 
-    target.data = (float*)heap_caps_malloc(img_f * sizeof(float), MALLOC_CAP_INTERNAL);
-    assert(target.data != NULL && "FATAL: failed to allocate target.data");
+    preprocessbuf = (uint8_t*)heap_caps_malloc(target_size * sizeof(uint8_t), MALLOC_CAP_INTERNAL);
 
-    size_t spiram_size = sizeof(float) * (img_c * 8 + img_f * 4 * (NUM_TRANSFORMATIONS + 1) + img_f * 1); 
+    size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t internal_biggest_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "internal free: %d, internal biggest block: %d", internal_free, internal_biggest_block);
+
+    size_t spiram_size = sizeof(float) * (target_size_c * 8 + target_size * 2 + target_size * 2 * (NUM_TRANSFORMATIONS + 1) + target_size_c * 2 * (NUM_TRANSFORMATIONS + 1)); 
     spiram_blob = heap_caps_malloc(spiram_size, MALLOC_CAP_SPIRAM);
     assert(spiram_blob != NULL && "FATAL: failed to allocate spiram_blob");
     float* ptr = (float*)spiram_blob;
-    filter = ptr; ptr += img_c;
-    A = ptr; ptr += img_c;
-    B = ptr; ptr += img_c;
-    A_inst = ptr; ptr += img_c;
-    B_inst = ptr; ptr += img_c;
-    frame_FT_buf = ptr; ptr += img_c;
-    gaussian_FT_buf = ptr; ptr += img_c;
-    gaussian_buf = ptr; ptr += img_c;
-    hann_window_2D = ptr; ptr += img_f;
-    f_i = ptr; ptr += img_f * (NUM_TRANSFORMATIONS + 1);
-    g_i = ptr; ptr += img_f * (NUM_TRANSFORMATIONS + 1);
-    F = ptr; ptr += img_f * (NUM_TRANSFORMATIONS + 1);
-    G = ptr; ptr += img_f * (NUM_TRANSFORMATIONS + 1);
+    A = ptr; ptr += target_size_c;
+    B = ptr; ptr += target_size_c;
+    A_inst = ptr; ptr += target_size_c;
+    B_inst = ptr; ptr += target_size_c;
+    filter = ptr; ptr += target_size_c;
+    frame_FT_buf = ptr; ptr += target_size_c;
+    gaussian_FT_buf = ptr; ptr += target_size_c;
+    gaussian_buf = ptr; ptr += target_size_c;
+    target.data = ptr; ptr += target_size;
+    hann_window_2D_buf = ptr; ptr += target_size;
+    f_i = ptr; ptr += target_size * (NUM_TRANSFORMATIONS + 1);
+    g_i = ptr; ptr += target_size * (NUM_TRANSFORMATIONS + 1);
+    F = ptr; ptr += target_size_c * (NUM_TRANSFORMATIONS + 1);
+    G = ptr; ptr += target_size_c * (NUM_TRANSFORMATIONS + 1);
 
     for (int i = 0; i < 256; i++) {
         log_lut[i] = logf((float)i + 1.0f);
     }
 
-    size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     size_t max_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     ESP_LOGI(TAG, "Heap Stats - Internal: %d, PSRAM: %d, Max Contiguous: %d\n", internal_free, psram_free, max_block);
@@ -91,9 +95,20 @@ Tracker::~Tracker() {
     heap_caps_free(spiram_blob);
 }
 
-void Tracker::initTracker() {
+void Tracker::initTracker(uint8_t* frame) {
+    ESP_LOGI(TAG, "generating hann window");
+    generate2dHannWindow(hann_window_2D_buf, target.padded_height, target.padded_width);
+    ESP_LOGI(TAG, "generating cropping frame");
+    cropFrameToTarget(frame, preprocessbuf);
+    ESP_LOGI(TAG, "generating preprocessing");
+    preprocessFrame(preprocessbuf);
+    ESP_LOGI(TAG, "generating FG");
     generateFG();
+    ESP_LOGI(TAG, "generating initial filter");
     generateInitialFilter();
+    isTracking = true;
+    pendingInit = false;
+    ESP_LOGI(TAG, "Tracking initialized");
 }
 
 void Tracker::generateFG() {
@@ -102,12 +117,10 @@ void Tracker::generateFG() {
     int rows = target.padded_height;
     int cols = target.padded_width;
     int target_size = rows * cols;
-    int stride = target_size * 2;
     //generate 2d gaussian for untransformed target
     int x_0 = (int)round(cols/2.0f);
     int y_0 = (int)round(rows/2.0f);
     generate2dGaussian(g_i, cols, rows, x_0, y_0, 2, 2, 1.0);
-    generate2dHannWindow(hann_window_2D, rows, cols);
     //assign target to first index of f_i
     for (int i = 0; i < target_size; i++) {
         f_i[i] = (float)target.data[i];
@@ -115,8 +128,8 @@ void Tracker::generateFG() {
 
     //generate affine transformation and their associated gaussians
     for (int i = 0; i < NUM_TRANSFORMATIONS; i++) {
-        generateRandomAffine(target.data, f_i + stride * (i + 1), rows, cols, x_shift_temp, y_shift_temp);
-        shiftGaussian(g_i, g_i + stride * (i + 1), rows, cols, x_shift_temp, y_shift_temp); 
+        generateRandomAffine(target.data, f_i + target_size * (i + 1), rows, cols, x_shift_temp, y_shift_temp);
+        shiftGaussian(g_i, g_i + target_size * (i + 1), rows, cols, x_shift_temp, y_shift_temp); 
     }
 }
 
@@ -125,12 +138,12 @@ void Tracker::generateInitialFilter() {
     int rows = target.padded_height;
     int cols = target.padded_width;
     size_t target_size = cols * rows;
-    int stride = target_size * 2;
 
-    //need to cast target.data and gaussians
     for(int i = 0; i < NUM_TRANSFORMATIONS + 1; i++) {
-        FFT2D(f_i + i * stride, &F[target_size * 2 * i], rows, cols, false);
-        FFT2D(g_i + i * stride, &G[target_size * 2 * i], rows, cols, false);
+        ESP_LOGI(TAG, "iteration %d f", i);
+        FFT2D(f_i + i * target_size, &F[target_size * 2 * i], rows, cols, false);
+        ESP_LOGI(TAG, "iteration %d g", i);
+        FFT2D(g_i + i * target_size, &G[target_size * 2 * i], rows, cols, false);
     }
 
     float* numer_buf = (float*)heap_caps_malloc(target_size * 2 * sizeof(float), MALLOC_CAP_SPIRAM);
@@ -148,10 +161,48 @@ void Tracker::generateInitialFilter() {
         complexMatAdd(A, numer_buf, A, target_size);
         complexMatAdd(B, denom_buf, B, target_size);
     } 
-    matScalarRealAdd(B, reg, target_size);
+    matScalarAdd(B, reg, target_size);
     elmWiseComplexDiv(A, B, target_size, filter);
-    matScalarRealAdd(B, -1 * reg, target_size);
+    if (filter[0] != filter[0]) {
+        ESP_LOGE(TAG, "ERROR: NANS IN THE FILTER");
+        printf("\nA: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %f", A[i]);
+        }
+        printf("\nB: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %f", B[i]);
+        }
+        printf("\nG: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %f", G[i]);
+        }
+        printf("\nF: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %f", F[i]);
+        }
+        printf("\nf_i: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %f", f_i[i]);
+        }
+        printf("\ntarget.data: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %f", target.data[i]);
+        }
+        printf("\ng_i: \n");
+        for (int i = rows * cols/2; i < rows * cols/2 + 128; i++) {
+            printf(" %f", g_i[i]);
+        }
+        printf("\npreprocessbuf: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %d", preprocessbuf[i]);
+        }
+    }
+    matScalarAdd(B, -1 * reg, target_size);
 
+    matScalarMult(A, 1.0/(NUM_TRANSFORMATIONS + 1), rows * cols);
+    matScalarMult(B, 1.0/(NUM_TRANSFORMATIONS + 1), rows * cols);
+   
     heap_caps_free(numer_buf);
     heap_caps_free(denom_buf);
 }
@@ -178,6 +229,29 @@ void Tracker::updateFilter(uint8_t* frame) {
     {
         Benchmarker b(&bd.ifft_cycles);
         IFFT2D(gaussian_FT_buf, gaussian_buf, rows, cols);
+    }
+    if (gaussian_buf[0] != gaussian_buf[0]) {
+        ESP_LOGE(TAG, "ERROR: gaussian_buf filled with NANS");
+        printf("preprocess buf: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %d", preprocessbuf[i]);
+        }
+        printf("\nfilter: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %f", filter[i]);
+        }
+        printf("\nframe_FT_buf: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %f", frame_FT_buf[i]);
+        }
+        printf("\ngaussian_FT_buf: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %f", gaussian_FT_buf[i]);
+        }
+        printf("\ngaussian buf: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %f", gaussian_buf[i]);
+        }
     }
     Coord peak = maxG(gaussian_buf, rows, cols);
     float psr = calcPSR(gaussian_buf, rows, cols, peak, 5);
@@ -208,9 +282,9 @@ void Tracker::updateFilter(uint8_t* frame) {
     matScalarMult(B, (1 - learning_rate), target_size);
     complexMatAdd(A_inst, A, A, target_size);
     complexMatAdd(B_inst, B, B, target_size);
-    matScalarRealAdd(B, reg, target_size);
+    matScalarAdd(B, reg, target_size);
     elmWiseComplexDiv(A, B, target_size, filter);
-    matScalarRealAdd(B, -1 * reg, target_size);
+    matScalarAdd(B, -1 * reg, target_size);
 
     bd.frame_count++;
     if (bd.frame_count == 100) {
@@ -238,30 +312,32 @@ void Tracker::cropFrameToTarget(uint8_t* frame, uint8_t* crop) {
     int x_init = target.x_pos - (width - target.true_width) / 2;
     int y_init = target.y_pos - (height - target.true_height) / 2;
 
-    for (int i = 0; i < width * height; i++) {
-        int x_dest = i % width;
-        int y_dest = i / width;
-        int x_source = x_dest + x_init;
-        int y_source = y_dest + y_init;
-
-        if (x_source < 0 || x_source >= source_width || y_source < 0 || y_source >= source_height) {
-            crop[i] = 0;
-        } else {
-            int source_index = y_source * source_width + x_source;
-            crop[i] = frame[source_index]; 
+    for (int y = 0; y < height; y++) {
+        int y_source = y + y_init;
+        for (int x = 0; x < width; x++) {
+            int x_source = x + x_init;
+            
+            if (x_source < 0 || x_source >= source_width || y_source < 0 || y_source >= source_height) {
+                crop[y * width + x] = 0;
+            } else {
+                crop[y * width + x] = frame[y_source * source_width + x_source]; 
+            }
         }
     }
 }
 
 Coord Tracker::maxG(float* G, int rows, int cols) {
-    //takes complex input, rows, cols wrt complex elements
     float max = -FLT_MAX;
     Coord max_coord = {0, 0};
-    for (int i = 0; i < rows * cols; i++) {
-        if (G[i * 2] > max) {
-            max = G[i * 2];
-            max_coord.x = i % cols;
-            max_coord.y = i / cols;
+    
+    for (int y = 0; y < rows; y++) {
+        for (int x = 0; x < cols; x++) {
+            int i = y * cols + x;
+            if (G[i * 2] > max) {
+                max = G[i * 2];
+                max_coord.x = x;
+                max_coord.y = y;
+            }
         }
     }
     return max_coord;
@@ -273,38 +349,43 @@ float Tracker::calcPSR(float* g, int rows, int cols, Coord peak_coord, int excl_
     float mean = 0;
     float M2 = 0;
     float max = -FLT_MAX;
-    for (int i = 0; i < rows * cols; i++) {
-        int x = i % cols;
-        int y = i / cols;
-        if (g[i*2] > max) {
-            max = g[i*2];
-        }
-        int dx = abs(x - peak_coord.x);
+    
+    for (int y = 0; y < rows; y++) {
         int dy = abs(y - peak_coord.y);
-        dx = (dx > cols / 2) ? cols - dx : dx;
         dy = (dy > rows / 2) ? rows - dy : dy;
 
-        if (dx <= excl_thresh && dy <= excl_thresh) {
-            continue;
+        for (int x = 0; x < cols; x++) {
+            int i = y * cols + x; 
+            
+            if (g[i*2] > max) {
+                max = g[i*2];
+            }
+            
+            int dx = abs(x - peak_coord.x);
+            dx = (dx > cols / 2) ? cols - dx : dx;
+
+            if (dx <= excl_thresh && dy <= excl_thresh) {
+                continue;
+            }
+            
+            count += 1;
+            float delta = g[i*2] - mean;
+            mean += delta/count;
+            M2 += delta * (g[i*2] - mean);
         }
-        count += 1;
-        float delta = g[i*2] - mean;
-        mean += delta/count;
-        M2 += delta * (g[i*2] - mean);
     }
-    ESP_LOGI(TAG, "M2: %f, count: %d", M2, count);
+    
     float stddev = sqrtf((float)M2/count);
-    ESP_LOGI(TAG, "PSR stddev: %f", stddev);
     if (stddev < 1e-5f) {
         stddev = 1e-5f; 
     }
     return ((max - mean)/stddev);
 }
-
-void Tracker::matScalarRealAdd(float* inout, float scalar, int size) {
+void Tracker::matScalarAdd(float* inout, float scalar, int size) {
     //takes complex input, adds scalar only to real part, size is in complex elements
     for(int i = 0; i < size; i++) {
         inout[i*2] = inout[i*2] + scalar;
+        inout[i * 2 + 1] = inout[i*2 + 1] + scalar;
     }
 }
 
@@ -378,11 +459,11 @@ void Tracker::preprocessFrame(uint8_t* frame) {
         stddev = 1e-5f; 
     }
     for (int i = 0; i < w * h; i++) {
-        target.data[i] = ((target.data[i] - mean)/stddev) * hann_window_2D[i];
+        target.data[i] = ((target.data[i] - mean)/stddev) * hann_window_2D_buf[i];
     }
 }
 
-void Tracker::updateTarget(uint8_t* payload, size_t len, int height, int width, int x_pos, int y_pos) {
+void Tracker::updateTarget(int height, int width, int x_pos, int y_pos) {
     if(xSemaphoreTake(this->target_lock, portMAX_DELAY)) {
         target.true_height = height;
         target.true_width = width;
@@ -390,14 +471,19 @@ void Tracker::updateTarget(uint8_t* payload, size_t len, int height, int width, 
         target.y_pos = y_pos;
         int height_exp = ceil(log2(height));
         target.padded_height = 1 << height_exp;
+        if (target.padded_height > MAX_TARGET_HEIGHT) {
+            target.padded_height = MAX_TARGET_HEIGHT;
+            ESP_LOGI(TAG, "target height over bounds");
+        }
         int width_exp = ceil(log2(width));
         target.padded_width = 1 << width_exp;
+        if (target.padded_width > MAX_TARGET_HEIGHT) {
+            target.padded_width = MAX_TARGET_HEIGHT;
+            ESP_LOGI(TAG, "target width over bounds");
+        }
         xSemaphoreGive(target_lock);
-        cropFrameToTarget(payload, preprocessbuf);
-        preprocessFrame(preprocessbuf);
-        initTracker();
-        ESP_LOGI(TAG, "starting tracking..");
-        isTracking = true;
+        pendingInit = true;
+        ESP_LOGI(TAG, "pending init set to true");
     } 
 }
 
@@ -559,7 +645,7 @@ void Tracker::FFT2D(float* input, float* output, int M, int N, bool complexInput
     // outer loops navigate frame
     for (int i = 0; i < M; i += TILE) {
         for (int j = 0; j < N; j += TILE) {
-            // inner loops navigate 
+            // inner loops navigate tile
             for (int ti = 0; ti < TILE && (i + ti) < M; ++ti) {
                 for (int tj = 0; tj < TILE && (j + tj) < N; ++tj) {
                     int src_idx = (i + ti) * N + (j + tj);
@@ -580,13 +666,13 @@ void Tracker::FFT2D(float* input, float* output, int M, int N, bool complexInput
 
     // transpose back
     // outer loops navigate frame
-    for (int i = 0; i < M; i += TILE) {
-        for (int j = 0; j < N; j += TILE) {
-            // inner loops navigate window
-            for (int ti = 0; ti < TILE && (i + ti) < M; ++ti) {
-                for (int tj = 0; tj < TILE && (j + tj) < N; ++tj) {
-                    int src_idx = (i + ti) * N + (j + tj);
-                    int dst_idx = (j + tj) * M + (i + ti);
+    for (int i = 0; i < N; i += TILE) {
+        for (int j = 0; j < M; j += TILE) {
+            // inner loops navigate tile
+            for (int ti = 0; ti < TILE && (i + ti) < N; ++ti) {
+                for (int tj = 0; tj < TILE && (j + tj) < M; ++tj) {
+                    int src_idx = (i + ti) * M + (j + tj);
+                    int dst_idx = (j + tj) * N + (i + ti);
                     FFT_buf[dst_idx * 2]     = FFT_trans_buf[src_idx * 2];
                     FFT_buf[dst_idx * 2 + 1] = FFT_trans_buf[src_idx * 2 + 1];
                 }
@@ -595,6 +681,18 @@ void Tracker::FFT2D(float* input, float* output, int M, int N, bool complexInput
     }
 
     memcpy(output, FFT_buf, M*N*2*sizeof(float));
+    if (output[0] != output[0]) {
+        ESP_LOGE(TAG, "FFT2D filled with NANS!");
+
+        printf("\ninput: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %f", input[i]);
+        }
+        printf("\noutput: \n");
+        for (int i = 0; i < 128; i++) {
+            printf(" %f", output[i]);
+        }
+    }
 }
 
 Coord Tracker::getTargetPOS() {

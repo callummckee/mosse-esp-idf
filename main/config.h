@@ -2,8 +2,10 @@
 
 
 #include "idf_additions.h"
-#define FRAME_WIDTH 160
-#define FRAME_HEIGHT 120
+#define FRAME_WIDTH 320
+#define FRAME_HEIGHT 240
+#define MAX_TARGET_WIDTH 64
+#define MAX_TARGET_HEIGHT 64
 
 struct PIDConfig {
         float pan_kp;

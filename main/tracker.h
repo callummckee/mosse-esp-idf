@@ -4,6 +4,7 @@
 #include "randomutils.h"
 #include "freertos/idf_additions.h"
 #include "benchmark.h"
+#include "turret.h"
 
 #define NUM_TRANSFORMATIONS 4
 
@@ -24,10 +25,14 @@ struct Coord {
 
 class Tracker {
     public:
-        Tracker();
+        Tracker(Turret* t);
         ~Tracker();
 
-        bool isTracking = false; 
+        Turret* turret;
+        Target target;
+
+        bool isTracking = false; //should probably move this to Turret class
+        bool pendingInit = false;
 
         BenchmarkData bd; 
 
@@ -35,19 +40,20 @@ class Tracker {
 
         SemaphoreHandle_t target_lock;
 
-        void updateTarget(uint8_t* payload, size_t len, int rows, int cols, int x_pos, int y_pos);
+        void updateTarget(int rows, int cols, int x_pos, int y_pos);
         void updateFilter(uint8_t* frame);
 
         Coord getTargetPOS();
 
         void cropFrameToTarget(uint8_t* frame, uint8_t* crop);
         Coord offset = {};
+        void initTracker(uint8_t* frame);
     private:
         const int TILE = 8;
-        Target target; //data allocated internally
 
         void* aligned_blob = NULL;
         void* spiram_blob = NULL;
+        void* internal_blob = NULL;
 
         //aligned blob
         float* FFT_buf = NULL;
@@ -55,30 +61,26 @@ class Tracker {
 
         //allocated internally
         uint8_t* preprocessbuf = NULL;
+        float* frame_FT_buf = NULL;
+        float* gaussian_buf = NULL;
+        float* gaussian_FT_buf = NULL;
+        float* hann_window_2D_buf = NULL;
 
         //spiram blob
-        float* filter = NULL;
         float* A = NULL; 
         float* B = NULL;
-
         float* f_i = NULL;
         float* g_i = NULL;
         float* F = NULL;
         float* G = NULL;
-
-        float* frame_FT_buf = NULL;
-        float* gaussian_buf = NULL;
-        float* gaussian_FT_buf = NULL;
         float* A_inst = NULL;
         float* B_inst = NULL;
-
-        float* hann_window_2D = NULL;
+        float* filter = NULL;
 
 
         float log_lut[256];
         
         void preprocessFrame(uint8_t* frame);
-        void initTracker();
 
         void generateFG();
         void generateInitialFilter();
@@ -93,7 +95,7 @@ class Tracker {
         void elmWiseComplexDiv(float* in1, float* in2, int size, float* output);
         void elmWiseComplexMult(float* in1, float* in2, int size, float* output, bool conjin1, bool conjin2);
         void complexMatAdd(float* in1, float* in2, float* out, int size);
-        void matScalarRealAdd(float* inout, float scalar, int size);
+        void matScalarAdd(float* inout, float scalar, int size);
         void matScalarMult(float* inout, float scalar, int size);
         Coord maxG(float* G, int rows, int cols);
         float calcPSR(float* g, int rows, int cols, Coord peak_coord, int excl_thresh);

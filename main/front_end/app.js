@@ -1,8 +1,8 @@
-const frameWidth = 160;
-const frameHeight = 120;
+const frameWidth = 320;
+const frameHeight = 240;
 const buf_size = 300;
-const maxTargetWidth = 2**(Math.floor(Math.log2(frameWidth)));
-const maxTargetHeight = 2**(Math.floor(Math.log2(frameHeight)));
+const maxTargetWidth = 64;
+const maxTargetHeight = 64;
 console.log(`maxTargetWidth ${maxTargetWidth}, maxTargetHeight ${maxTargetHeight}`);
 
 const frameHistory = new Array(buf_size);
@@ -84,15 +84,17 @@ document.addEventListener('keydown', async (e) => {
     if(e.key == "Enter") {
         if (confirmed) {
             confirmed = false;
+            document.getElementById('servo_controls').style.display = 'block';
             confirmedFrame = -1;
             confirmCtx.clearRect(0, 0, confirmedCanvas.width, confirmedCanvas.height);
-            const combinedData = new Uint8Array(1);
-            combinedData[0] = 0;
-            target_socket.send(combinedData.buffer);
+            const targetData = new Uint8Array(1);
+            targetData[0] = 0;
+            target_socket.send(targetData.buffer);
         }
         else if (canConfirm) {
             confirmed = true;
             canConfirm = false;
+            document.getElementById('servo_controls').style.display = 'none';
             drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
             confirmCtx.strokeStyle = '#FF0000';
             confirmCtx.lineWidth = 1;
@@ -106,18 +108,12 @@ document.addEventListener('keydown', async (e) => {
             const bitmap = await createImageBitmap(blob);
             targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
             targetCtx.drawImage(bitmap, confirmRoi.x, confirmRoi.y, confirmRoi.w, confirmRoi.h, 0, 0, confirmRoi.w, confirmRoi.h);
-            const imageData = targetCtx.getImageData(0, 0, confirmRoi.w, confirmRoi.h);
-            const rawPixels = new Uint8Array(imageData.width * imageData.height);
-            for (let i = 0; i < rawPixels.length; i++) {
-                rawPixels[i] = imageData.data[i * 4];
-            }
-            const combinedData = new Uint8Array(rawPixels.length + 4);
-            combinedData[0] = confirmRoi.h;
-            combinedData[1] = confirmRoi.w;
-            combinedData[2] = confirmRoi.x;
-            combinedData[3] = confirmRoi.y;
-            combinedData.set(rawPixels, 4);
-            target_socket.send(combinedData.buffer);
+            const targetData = new Uint8Array(4);
+            targetData[0] = confirmRoi.h;
+            targetData[1] = confirmRoi.w;
+            targetData[2] = confirmRoi.x;
+            targetData[3] = confirmRoi.y;
+            target_socket.send(targetData.buffer);
         }
     }
 });
@@ -183,3 +179,27 @@ drawCanvas.addEventListener('mouseup', (e) => {
 
     console.log("ROI Selected (Sensor Coords):", drawRoi);
 });
+
+
+const panSlider = document.getElementById('pan_slider');
+const tiltSlider = document.getElementById('tilt_slider');
+const panVal = document.getElementById('pan_val');
+const tiltVal = document.getElementById('tilt_val');
+
+function sendServoAngles() {
+    if (confirmed) return;
+
+    fetch('/update', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ 
+            pan_angle: parseFloat(panSlider.value), 
+            tilt_angle: parseFloat(tiltSlider.value) 
+        })
+    });
+}
+
+panSlider.addEventListener('input', (e) => panVal.innerText = e.target.value);
+tiltSlider.addEventListener('input', (e) => tiltVal.innerText = e.target.value);
+panSlider.addEventListener('change', sendServoAngles);
+tiltSlider.addEventListener('change', sendServoAngles);

@@ -9,6 +9,7 @@
 
 #include "tracker.h"
 #include "config.h"
+#include "turret.h"
 
 void start_mdns();
 
@@ -35,7 +36,7 @@ class JPEGEnc {
 
 class Server {
     public:
-        Server(Tracker* t, Config* c);
+        Server(Tracker* tr, Config* c);
         ~Server();
 
         TaskHandle_t* xCameraTaskHandle = NULL;

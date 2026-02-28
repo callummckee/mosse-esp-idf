@@ -1,5 +1,6 @@
 #include "server.h"
 #include "config.h"
+#include "esp_err.h"
 #include "freertos/portmacro.h"
 #include "wifi_credentials.h"
 #include "tracker.h"
@@ -58,9 +59,9 @@ jpeg_error_t JPEGEnc::encode(uint8_t* inbuf, uint8_t* outbuf) {
     return err;
 }
 
-Server::Server(Tracker* t, Config* c) {
+Server::Server(Tracker* tr, Config* c) {
     int img_size = FRAME_WIDTH * FRAME_HEIGHT;
-    tracker = t;
+    tracker = tr;
     cfg = c;
 
     pp.pingpong_lock = xSemaphoreCreateMutex();
@@ -161,10 +162,16 @@ void Server::event_handler_tramp(void* arg, esp_event_base_t event_base, int32_t
 
 void Server::event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        esp_err_t err = esp_wifi_connect();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "error: %s", esp_err_to_name(err));
+        }
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        esp_wifi_connect();
+        esp_err_t err = esp_wifi_connect();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "error: %s", esp_err_to_name(err));
+        }
         ESP_LOGI(TAG, "retry connection");
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -342,7 +349,7 @@ esp_err_t Server::target_socket_handler(httpd_req_t* req) {
             tracker->isTracking = false;
         }
         else {
-            tracker->updateTarget(&(buf[4]), ws_pkt.len - 4, buf[0], buf[1], buf[2], buf[3]);
+            tracker->updateTarget(buf[0], buf[1], buf[2], buf[3]);
         }
         heap_caps_free(buf);
     }
@@ -359,7 +366,7 @@ void Server::ws_send_stream(void *arg) {
     } 
     self->pp.reader_busy = false;
 
-    Coord pos;
+    Coord pos = {};
     if(xSemaphoreTake(self->target_pos_lock, portMAX_DELAY)) {
         pos.x = self->target_pos.x;
         pos.y = self->target_pos.y;
@@ -476,39 +483,50 @@ esp_err_t Server::update_handler(httpd_req_t* req) {
     if (root == NULL) {
         return ESP_FAIL;
     }
-    
-    cJSON *pan_kp_item = cJSON_GetObjectItem(root, "pan_kp");
-    cJSON *tilt_kp_item = cJSON_GetObjectItem(root, "tilt_kp");
-    cJSON *pan_kd_item = cJSON_GetObjectItem(root, "pan_kd");
-    cJSON *tilt_kd_item = cJSON_GetObjectItem(root, "tilt_kd");
-    cJSON *pan_ki_item = cJSON_GetObjectItem(root, "pan_ki");
-    cJSON *tilt_ki_item = cJSON_GetObjectItem(root, "tilt_ki");
-    
 
-    if (xSemaphoreTake(cfg->configMutex, pdMS_TO_TICKS(100))) {
-        if (cJSON_IsNumber(pan_kp_item)) {
-            cfg->syscfg.pan_kp = pan_kp_item->valuedouble;
+    if (cJSON_HasObjectItem(root, "pan_kp")) {
+        cJSON *pan_kp_item = cJSON_GetObjectItem(root, "pan_kp");
+        cJSON *tilt_kp_item = cJSON_GetObjectItem(root, "tilt_kp");
+        cJSON *pan_kd_item = cJSON_GetObjectItem(root, "pan_kd");
+        cJSON *tilt_kd_item = cJSON_GetObjectItem(root, "tilt_kd");
+        cJSON *pan_ki_item = cJSON_GetObjectItem(root, "pan_ki");
+        cJSON *tilt_ki_item = cJSON_GetObjectItem(root, "tilt_ki");
+
+
+        if (xSemaphoreTake(cfg->configMutex, pdMS_TO_TICKS(100))) {
+            if (cJSON_IsNumber(pan_kp_item)) {
+                cfg->syscfg.pan_kp = pan_kp_item->valuedouble;
+            }
+            if (cJSON_IsNumber(tilt_kp_item)) {
+                cfg->syscfg.tilt_kp = tilt_kp_item->valuedouble;
+            }
+            if (cJSON_IsNumber(pan_kd_item)) {
+                cfg->syscfg.pan_kd = pan_kd_item->valuedouble;
+            }
+            if (cJSON_IsNumber(tilt_kd_item)) {
+                cfg->syscfg.tilt_kd = tilt_kd_item->valuedouble;
+            }
+            if (cJSON_IsNumber(pan_ki_item)) {
+                cfg->syscfg.pan_ki = pan_ki_item->valuedouble;
+            }
+            if (cJSON_IsNumber(tilt_ki_item)) {
+                cfg->syscfg.tilt_ki = tilt_ki_item->valuedouble;
+            }
+            xSemaphoreGive(cfg->configMutex);
+            cfg->saveConfigToNVS();
+            cfg->newcfg = true;
         }
-        if (cJSON_IsNumber(tilt_kp_item)) {
-            cfg->syscfg.tilt_kp = tilt_kp_item->valuedouble;
-        }
-        if (cJSON_IsNumber(pan_kd_item)) {
-            cfg->syscfg.pan_kd = pan_kd_item->valuedouble;
-        }
-        if (cJSON_IsNumber(tilt_kd_item)) {
-            cfg->syscfg.tilt_kd = tilt_kd_item->valuedouble;
-        }
-        if (cJSON_IsNumber(pan_ki_item)) {
-            cfg->syscfg.pan_ki = pan_ki_item->valuedouble;
-        }
-        if (cJSON_IsNumber(tilt_ki_item)) {
-            cfg->syscfg.tilt_ki = tilt_ki_item->valuedouble;
-        }
-        xSemaphoreGive(cfg->configMutex);
-        cfg->saveConfigToNVS();
-        cfg->newcfg = true;
     }
-
+    
+    else if(cJSON_HasObjectItem(root, "pan_angle")) {
+        if (!tracker->isTracking) {
+            cJSON* pan_angle_item = cJSON_GetObjectItem(root, "pan_angle");
+            cJSON* tilt_angle_item = cJSON_GetObjectItem(root, "tilt_angle");
+            tracker->turret->set_servo_angle(tracker->turret->pan_channel, pan_angle_item->valuedouble);
+            tracker->turret->set_servo_angle(tracker->turret->tilt_channel, tilt_angle_item->valuedouble);
+        }
+    }
+    
     cJSON_Delete(root);
     httpd_resp_set_status(req, "204 No Content");
     httpd_resp_send(req, NULL, 0); 
